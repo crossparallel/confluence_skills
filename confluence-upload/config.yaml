@@ -1,0 +1,11 @@
+# Confluence 用户名，同时作为默认个人子页面标题使用。
+username: "your-email"
+
+# Confluence PAT/API token。请求时会按附件脚本规则发送 Authorization: Bearer <api-token>。
+api-token: "your-api-token"
+
+# Confluence 基础地址。
+base_url: "http://cf.myhexin.com"
+
+# 默认根页面 ID。上传时会先在该页面下查找或创建 username 子页面。
+root_page: "your-root-page-id"

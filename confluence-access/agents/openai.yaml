@@ -1,0 +1,4 @@
+interface:
+  display_name: "Confluence Access"
+  short_description: "Find and access content in Confluence documents."
+  default_prompt: "Use $confluence-access to find relevant content in Confluence documents."

@@ -1,0 +1,9 @@
+# context-transform skill 使用的稳定元数据。
+# 如果有项目或团队的固定值，可以在这里替换。
+
+# 生成文档中展示的用户名。
+# 中文姓名建议使用拼音，便于企业文档统一检索。
+username: "wangyikai"
+
+# 生成文档计划写入或维护的 Confluence 页面/空间地址。
+confluence_url: "http://cf.myhexin.com"

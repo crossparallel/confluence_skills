@@ -1,0 +1,4 @@
+interface:
+  display_name: "Confluence Upload"
+  short_description: "Upload generated documents to Confluence."
+  default_prompt: "Use $confluence-upload to publish generated documentation to Confluence."

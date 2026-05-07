@@ -1,0 +1,10 @@
+# 用于 Basic 鉴权的 Confluence 账号。
+# 如果是 Confluence Cloud，通常填写账号邮箱。
+username: "you-email"
+
+# 与 username 配套使用的 API token 或类似密码的访问令牌。
+# 脚本会发送 Authorization: Basic base64("username:api-token")。
+api-token: "your-api-key"
+
+# Confluence 的基础地址。
+base_url: "http://cf.myhexin.com"
