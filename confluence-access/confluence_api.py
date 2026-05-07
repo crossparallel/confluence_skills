@@ -264,7 +264,7 @@ class ConfluenceClient:
         space_key: str | None = None,
         exact_threshold: int = 20,
     ) -> dict[str, Any]:
-        """执行第一轮候选搜索；必要时做第二轮元数据收敛。"""
+        """执行第一轮候选搜索；宽泛结果只返回方向建议，不自动二轮搜索。"""
         safe_limit = min(max(limit, 1), 50)
         cql_parts = [
             'text ~ "{0}"'.format(_escape_cql(keyword)),
@@ -295,40 +295,11 @@ class ConfluenceClient:
             or bool(relevance.get("hasMore"))
             or bool(recent.get("hasMore"))
         )
-        needs_second_round = len(exact_results) > exact_threshold or first_round_exceeds_limit
-        auto_read_results = [] if needs_second_round else exact_results
-
-        second_round: dict[str, Any] | None = None
-        if needs_second_round:
-            title_cql_parts = [
-                'title ~ "{0}"'.format(_escape_cql(keyword)),
-                "type = page",
-            ]
-            if space_key:
-                title_cql_parts.append('space = "{0}"'.format(_escape_cql(space_key)))
-            title_cql = " AND ".join(title_cql_parts)
-            title_recent_cql, title_recent = self.search_by_last_modified(
-                title_cql,
-                limit=safe_limit,
-                expand=metadata_expand,
-            )
-            second_round_results = merge_candidate_results(
-                [("title_recent", title_recent.get("results", []))],
-                keyword,
-            )
-            second_round = {
-                "reason": build_second_round_reason(
-                    len(exact_results),
-                    exact_threshold,
-                    first_round_count,
-                    safe_limit,
-                    first_round_exceeds_limit,
-                ),
-                "cql": title_recent_cql,
-                "results": second_round_results,
-                "size": len(second_round_results),
-                "limit": safe_limit,
-            }
+        needs_user_direction = len(exact_results) > exact_threshold or first_round_exceeds_limit
+        auto_read_results = [] if needs_user_direction else exact_results
+        direction_suggestions = (
+            build_direction_suggestions(merged, keyword) if needs_user_direction else []
+        )
 
         return {
             "keyword": keyword,
@@ -339,11 +310,13 @@ class ConfluenceClient:
             "firstRoundResultCount": first_round_count,
             "firstRoundResultLimit": safe_limit,
             "firstRoundExceedsLimit": first_round_exceeds_limit,
-            "needsSecondRound": needs_second_round,
-            "canReadDirectly": not needs_second_round,
+            "needsUserDirection": needs_user_direction,
+            "needsSecondRound": needs_user_direction,
+            "canReadDirectly": not needs_user_direction,
             "autoReadPageIds": [
                 str(result["id"]) for result in auto_read_results if result.get("id")
             ],
+            "directionSuggestions": direction_suggestions,
             "firstRound": {
                 "relevanceCql": base_cql,
                 "recentCql": recent_cql,
@@ -352,7 +325,7 @@ class ConfluenceClient:
                 "results": merged,
                 "size": len(merged),
             },
-            "secondRound": second_round,
+            "secondRound": None,
         }
 
     def search_by_last_modified(
@@ -823,22 +796,67 @@ def slim_list(raw: dict[str, Any], base_url: str) -> dict[str, Any]:
     }
 
 
-def build_second_round_reason(
-    exact_count: int,
-    exact_threshold: int,
-    first_round_count: int,
-    first_round_limit: int,
-    first_round_exceeds_limit: bool,
-) -> str:
-    """说明触发第二轮候选收敛的原因。"""
-    reasons: list[str] = []
-    if exact_count > exact_threshold:
-        reasons.append(f"完全相关结果 {exact_count} 条超过阈值 {exact_threshold} 条")
-    if first_round_exceeds_limit:
-        reasons.append(f"第一轮候选结果 {first_round_count} 条超过 {first_round_limit} 条或存在更多分页")
-    if not reasons:
-        reasons.append("需要进一步收敛候选结果")
-    return "；".join(reasons) + "，已按标题相关度和最近更新时间进行第二轮收敛"
+def build_direction_suggestions(
+    candidates: list[dict[str, Any]],
+    keyword: str,
+    max_directions: int = 6,
+    max_examples: int = 5,
+) -> list[dict[str, Any]]:
+    """从第一轮候选标题中提炼主要相关方向，供用户选择。"""
+    keyword_tokens = set(extract_title_tokens(keyword))
+    groups: dict[str, list[dict[str, Any]]] = {}
+
+    for candidate in candidates:
+        title = str(candidate.get("title") or "")
+        tokens = [token for token in extract_title_tokens(title) if token not in keyword_tokens]
+        if not tokens:
+            tokens = extract_title_tokens(title)
+        direction = tokens[0] if tokens else "其他相关结果"
+        groups.setdefault(direction, []).append(candidate)
+
+    suggestions = []
+    for direction, items in groups.items():
+        examples = [
+            {
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "spaceKey": item.get("spaceKey"),
+                "url": item.get("url"),
+            }
+            for item in items[:max_examples]
+        ]
+        suggestions.append(
+            {
+                "direction": direction,
+                "count": len(items),
+                "exampleTitles": [str(item.get("title")) for item in items[:max_examples]],
+                "examples": examples,
+            }
+        )
+
+    return sorted(suggestions, key=lambda item: item["count"], reverse=True)[:max_directions]
+
+
+def extract_title_tokens(text: str) -> list[str]:
+    """提取标题关键词，兼容中英文和常见技术命名。"""
+    stopwords = {
+        "and",
+        "the",
+        "for",
+        "with",
+        "from",
+        "page",
+        "wiki",
+        "confluence",
+        "文档",
+        "说明",
+        "汇总",
+        "记录",
+        "相关",
+        "问题",
+    }
+    tokens = re.findall(r"[\w\u4e00-\u9fff]{2,}", text.casefold())
+    return [token for token in tokens if token not in stopwords]
 
 
 def merge_candidate_results(
@@ -1276,7 +1294,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--exact-threshold",
         type=int,
         default=20,
-        help="Run second-round candidate narrowing when exact relevant results exceed this count.",
+        help="Ask the user to choose a direction when exact relevant results exceed this count.",
     )
     search_candidates.set_defaults(handler=handle_search_page_candidates)
 

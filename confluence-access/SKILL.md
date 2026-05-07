@@ -210,7 +210,7 @@ confluence-access/cache/page-<page_id>.json
 
 搜索或列表结果只展示关键信息：标题、页面 ID、作者、空间 key/name、URL、版本号、最近更新时间。
 
-搜索类任务默认先执行候选检索，再根据命中数量决定是否需要用户确认。第一阶段只检索候选页面元数据；如果第一阶段完全相关结果不超过 20 个，且初始候选合并去重后不超过 50 个，可以直接读取这些页面正文并总结，不需要用户确认，也不需要第二轮搜索。只要第一阶段完全相关结果大于 20 个，或初始候选结果大于 50 个，就必须进入第二轮候选收敛，并在用户看过候选列表、明确下一步指示后读取具体页面内容。
+搜索类任务默认先执行候选检索，再根据命中数量决定是否需要用户确认。第一阶段只检索候选页面元数据；如果第一阶段完全相关结果不超过 20 个，且初始候选合并去重后不超过 50 个，可以直接读取这些页面正文并总结，不需要用户确认。只要第一阶段完全相关结果大于 20 个，或初始候选结果大于 50 个，就不要自动进行第二轮搜索，也不要读取正文；应先读取 50+50 个候选结果的标题，从标题中提炼几个主要相关方向，提供给用户选择。
 
 第一阶段必须执行两种候选检索：
 
@@ -221,9 +221,9 @@ confluence-access/cache/page-<page_id>.json
 
 如果第一阶段搜到的“完全相关”结果不超过 20 个，且初始候选合并去重后不超过 50 个，直接对这些完全相关页面调用 `get-page --summary` 读取正文并总结。优先使用 `search-page-candidates` 返回的 `autoReadPageIds` 作为直接读取范围。
 
-如果第一阶段搜到的“完全相关”结果大于 20 个，或初始候选合并去重后大于 50 个，需要先进行第二轮候选收敛；第二轮仍只读取候选元数据，不读取正文。优先使用 `search-page-candidates`，它会返回 `needsSecondRound`、`canReadDirectly`、`autoReadPageIds`、`exactRelevantCount`、`firstRoundResultCount`、`firstRoundExceedsLimit`、`firstRound` 和必要时的 `secondRound` 结果。
+如果第一阶段搜到的“完全相关”结果大于 20 个，或初始候选合并去重后大于 50 个，需要先展示 `directionSuggestions` 中的主要相关方向和代表性标题，让用户选择下一步方向。优先使用 `search-page-candidates`，它会返回 `needsUserDirection`、`canReadDirectly`、`autoReadPageIds`、`directionSuggestions`、`exactRelevantCount`、`firstRoundResultCount`、`firstRoundExceedsLimit` 和 `firstRound` 结果。
 
-只有进入第二轮候选收敛时，才需要等待用户根据候选列表给出下一步指示。读取页面后，回答必须基于实际页面内容，用正常文段语言总结；不要把完整 JSON 原始结果作为默认回复。
+只有用户根据方向建议给出下一步搜索方向后，才根据用户需求的内容类型执行第二轮细分搜索。第二轮细分搜索仍先返回候选元数据；若细分结果已足够明确，再读取具体页面内容并总结。读取页面后，回答必须基于实际页面内容，用正常文段语言总结；不要把完整 JSON 原始结果作为默认回复。
 
 只有当用户明确询问具体内容的来源、要求查看原始检索结果、要求核对页面元数据，或要求返回 JSON 时，才返回 JSON 格式的全部页面信息。需要说明来源时，可在文段回答中引用页面标题、页面 ID 或 URL；如果用户要求完整来源，再给出完整 JSON。
 
@@ -240,8 +240,9 @@ confluence-access/cache/page-<page_id>.json
 
 1. 如果不确定配置是否正确，先运行 `check-config`。
 2. 第一阶段用 `search-page-candidates` 定位候选页面，最多按相关程度 50 条、最近时间 50 条。
-3. 如果 `needsSecondRound` 为 `false`，直接读取 `autoReadPageIds` 中的页面正文并总结，不等待用户确认。
-4. 如果 `needsSecondRound` 为 `true`，先展示第二轮候选收敛结果，让用户从更小范围中选择；此时不要读取正文。
-5. 用户明确指定页面 ID、标题、URL 或选择范围后，再用 `get-page --summary` 读取具体正文。
-6. 必要时查看 `cache/` 中的页面 JSON。
-7. 汇总整理已读取页面的实际内容，用正常文段语言回答用户；只有用户追问来源、原始结果或 JSON 时，才返回完整 JSON 信息。
+3. 如果 `needsUserDirection` 为 `false`，直接读取 `autoReadPageIds` 中的页面正文并总结，不等待用户确认。
+4. 如果 `needsUserDirection` 为 `true`，展示 `directionSuggestions` 和代表性标题，让用户选择下一步搜索方向；此时不要进行第二轮搜索，也不要读取正文。
+5. 用户明确方向后，根据用户需求的内容类型组合关键词、空间、标题词或 CQL 条件执行第二轮细分搜索。
+6. 第二轮细分结果明确后，用 `get-page --summary` 读取具体正文。
+7. 必要时查看 `cache/` 中的页面 JSON。
+8. 汇总整理已读取页面的实际内容，用正常文段语言回答用户；只有用户追问来源、原始结果或 JSON 时，才返回完整 JSON 信息。
