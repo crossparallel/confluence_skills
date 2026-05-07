@@ -276,8 +276,8 @@ class ConfluenceClient:
         base_cql = " AND ".join(cql_parts)
         metadata_expand = "content.space,content.history.createdBy,content.version"
         relevance = self.search(base_cql, limit=safe_limit, expand=metadata_expand)
-        recent = self.search(
-            f"{base_cql} ORDER BY lastmodified DESC",
+        recent_cql, recent = self.search_by_last_modified(
+            base_cql,
             limit=safe_limit,
             expand=metadata_expand,
         )
@@ -301,8 +301,8 @@ class ConfluenceClient:
             if space_key:
                 title_cql_parts.append('space = "{0}"'.format(_escape_cql(space_key)))
             title_cql = " AND ".join(title_cql_parts)
-            title_recent = self.search(
-                f"{title_cql} ORDER BY lastmodified DESC",
+            title_recent_cql, title_recent = self.search_by_last_modified(
+                title_cql,
                 limit=safe_limit,
                 expand=metadata_expand,
             )
@@ -314,7 +314,7 @@ class ConfluenceClient:
                 "reason": (
                     "第一轮完全相关结果超过阈值，已按标题相关度和最近更新时间进行第二轮收敛"
                 ),
-                "cql": f"{title_cql} ORDER BY lastmodified DESC",
+                "cql": title_recent_cql,
                 "results": second_round_results,
                 "size": len(second_round_results),
                 "limit": safe_limit,
@@ -333,7 +333,7 @@ class ConfluenceClient:
             ],
             "firstRound": {
                 "relevanceCql": base_cql,
-                "recentCql": f"{base_cql} ORDER BY lastmodified DESC",
+                "recentCql": recent_cql,
                 "relevanceSize": len(relevance.get("results", [])),
                 "recentSize": len(recent.get("results", [])),
                 "results": merged,
@@ -341,6 +341,31 @@ class ConfluenceClient:
             },
             "secondRound": second_round,
         }
+
+    def search_by_last_modified(
+        self,
+        base_cql: str,
+        limit: int = 50,
+        start: int = 0,
+        expand: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """按最近更新时间搜索；兼容不同 Confluence 版本的字段大小写。"""
+        candidates = (
+            f"{base_cql} order by lastModified desc",
+            f"{base_cql} order by lastmodified desc",
+        )
+        first_error: ConfluenceApiError | None = None
+
+        for cql in candidates:
+            try:
+                return cql, self.search(cql, limit=limit, start=start, expand=expand)
+            except ConfluenceApiError as exc:
+                if first_error is None:
+                    first_error = exc
+
+        if first_error is not None:
+            raise first_error
+        raise ConfluenceApiError("Unable to build last modified search CQL")
 
     def search_by_title(
         self,
