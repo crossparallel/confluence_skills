@@ -151,13 +151,13 @@ python confluence_api.py list-attachments PAGE_ID --limit 25
 默认文档必须包含元数据表：
 
 ```markdown
-| 字段 | 内容 |
-| --- | --- |
-| 用户名 | 待确认 |
-| 记录日期 | YYYY-MM-DD |
-| 使用模型参数 | 待确认 |
-| 使用 Agent 类别 | 待确认 |
-| 文档写入位置 | 待确认 |
+| 字段            | 内容       |
+| --------------- | ---------- |
+| 用户名          | 待确认     |
+| 记录日期        | YYYY-MM-DD |
+| 使用模型参数    | 待确认     |
+| 使用 Agent 类别 | 待确认     |
+| 文档写入位置    | 待确认     |
 ```
 
 使用时可以这样描述需求：
@@ -245,6 +245,16 @@ python confluence_api.py list-spaces --limit 5
 ### 3.2 context-transform/config.yaml
 
 用于生成 Markdown 文档时填充稳定元数据。
+
+也可以优先通过环境变量提供：
+
+```text
+CONFLUENCE_USERNAME
+CONFLUENCE_API_TOKEN
+CONFLUENCE_BASE_URL
+```
+
+其中 `CONFLUENCE_USERNAME` 填邮箱，文档元数据中的 `username` 使用邮箱 `@` 前面的部分；`CONFLUENCE_BASE_URL` 用作 Confluence 地址或文档写入位置；`CONFLUENCE_API_TOKEN` 仅供后续 Confluence 访问或上传流程使用，生成文档时不要写入文档内容。
 
 配置示例：
 

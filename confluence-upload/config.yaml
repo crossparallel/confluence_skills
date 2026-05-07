@@ -8,4 +8,4 @@ api-token: "your-api-token"
 base_url: "http://cf.myhexin.com"
 
 # 默认根页面 ID。上传时会先在该页面下查找或创建 username 子页面。
-root_page: "your-root-page-id"
+root_page: "1500930304"

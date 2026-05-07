@@ -48,12 +48,14 @@ description: Generate enterprise-ready Markdown documentation from the current c
 
 ```text
 CONFLUENCE_USERNAME
+CONFLUENCE_API_TOKEN
 CONFLUENCE_BASE_URL
 ```
 
 约定：
 
 - `CONFLUENCE_USERNAME` 填邮箱。
+- `CONFLUENCE_API_TOKEN` 供后续 Confluence 访问或上传流程使用；生成文档时不要把 token 写入文档内容。
 - 文档元数据中的 `username` 使用邮箱 `@` 前面的部分，例如 `wangyikai@example.com` 对应 `wangyikai`。
 - `CONFLUENCE_BASE_URL` 对应文档写入位置或 Confluence 地址。
 - 如果没有环境变量，再读取 `config.yaml`。
