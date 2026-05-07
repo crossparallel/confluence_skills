@@ -137,7 +137,7 @@ python confluence_api.py list-attachments PAGE_ID --limit 25
 - 生成会议纪要、技术讨论纪要、技术方案或技术决策记录。
 - 生成问题复盘、异常处理说明、项目阶段总结或交接文档。
 - 输出适合复制到 Confluence 的 Markdown。
-- 默认将文档保存到 `context-transform/cache/`。
+- 默认将文档保存到 `context-transform/cache/`，随后继续调用 `confluence-upload` 上传到 Confluence。
 
 默认工作方式：
 
@@ -146,7 +146,9 @@ python confluence_api.py list-attachments PAGE_ID --limit 25
 3. 梳理当前对话或本地上下文。
 4. 提取目标、背景、执行过程、关键决策、异常、结果和后续建议。
 5. 生成带标题和元数据表的 Markdown 文档。
-6. 保存到 `context-transform/cache/`，作为后续上传输入。
+6. 保存到 `context-transform/cache/`，作为上传输入。
+7. 默认继续调用 `confluence-upload` 上传最新 Markdown 文档。
+8. 只有用户明确提及本地总结、只生成本地文件、无需上传或不要上传时，才停止在本地文件。
 
 默认文档必须包含元数据表：
 
@@ -159,6 +161,8 @@ python confluence_api.py list-attachments PAGE_ID --limit 25
 | 使用 Agent 类别 | 待确认     |
 | 文档写入位置    | 待确认     |
 ```
+
+`使用模型参数` 和 `使用 Agent 类别` 必须根据本次实际运行情况现场确认后填写；无法确认时写“待确认”，不要默认填写 `codex` 或任何固定模型/agent 名称。
 
 使用时可以这样描述需求：
 
@@ -272,6 +276,8 @@ confluence_url: "https://your-confluence.example.com"
 - `username`：写入 Markdown 元数据表的用户标识。
 - `confluence_url`：写入 Markdown 元数据表的文档位置或目标空间地址。
 
+生成文档中引用 Confluence 页面来源时，应优先使用可直接访问的 Markdown 链接，例如 `[页面标题](页面URL)`；页面 ID 只能作为辅助信息，不要只给页面 ID。
+
 如果某个值暂时无法确认，agent 应在生成文档时写“待确认”，不要编造。
 
 ### 3.3 confluence-upload/config.yaml
@@ -379,7 +385,7 @@ python confluence-upload\confluence_upload.py upload-latest-context
 
 ### 不想自动上传
 
-用户只要求生成 Markdown 文档时，agent 应只使用 `context-transform`。生成完成后提示本地文件路径，并说明可以继续使用 `confluence-upload` 上传。
+默认情况下，生成 Markdown 文档后会继续上传到 Confluence。只有用户明确提及“本地总结”“只生成本地文件”“无需上传”“不要上传”等含义时，agent 才只使用 `context-transform`，生成完成后提示本地文件路径，并说明本次未上传。
 
 ## 6. 安全约束
 

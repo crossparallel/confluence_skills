@@ -289,7 +289,13 @@ class ConfluenceClient:
             keyword,
         )
         exact_results = [result for result in merged if result.get("exactRelevant")]
-        needs_second_round = len(exact_results) > exact_threshold
+        first_round_count = len(merged)
+        first_round_exceeds_limit = (
+            first_round_count > safe_limit
+            or bool(relevance.get("hasMore"))
+            or bool(recent.get("hasMore"))
+        )
+        needs_second_round = len(exact_results) > exact_threshold or first_round_exceeds_limit
         auto_read_results = [] if needs_second_round else exact_results
 
         second_round: dict[str, Any] | None = None
@@ -311,8 +317,12 @@ class ConfluenceClient:
                 keyword,
             )
             second_round = {
-                "reason": (
-                    "第一轮完全相关结果超过阈值，已按标题相关度和最近更新时间进行第二轮收敛"
+                "reason": build_second_round_reason(
+                    len(exact_results),
+                    exact_threshold,
+                    first_round_count,
+                    safe_limit,
+                    first_round_exceeds_limit,
                 ),
                 "cql": title_recent_cql,
                 "results": second_round_results,
@@ -326,6 +336,9 @@ class ConfluenceClient:
             "limitPerSearch": safe_limit,
             "exactRelevantCount": len(exact_results),
             "exactRelevantThreshold": exact_threshold,
+            "firstRoundResultCount": first_round_count,
+            "firstRoundResultLimit": safe_limit,
+            "firstRoundExceedsLimit": first_round_exceeds_limit,
             "needsSecondRound": needs_second_round,
             "canReadDirectly": not needs_second_round,
             "autoReadPageIds": [
@@ -799,12 +812,33 @@ def slim_space(space: dict[str, Any], base_url: str) -> dict[str, Any]:
 
 def slim_list(raw: dict[str, Any], base_url: str) -> dict[str, Any]:
     """将 Confluence 列表响应转换为精简列表。"""
+    links = raw.get("_links", {})
     return {
         "results": [slim_page(item, base_url) for item in raw.get("results", [])],
         "size": raw.get("size"),
         "start": raw.get("start"),
         "limit": raw.get("limit"),
+        "hasMore": bool(links.get("next")),
+        "next": links.get("next"),
     }
+
+
+def build_second_round_reason(
+    exact_count: int,
+    exact_threshold: int,
+    first_round_count: int,
+    first_round_limit: int,
+    first_round_exceeds_limit: bool,
+) -> str:
+    """说明触发第二轮候选收敛的原因。"""
+    reasons: list[str] = []
+    if exact_count > exact_threshold:
+        reasons.append(f"完全相关结果 {exact_count} 条超过阈值 {exact_threshold} 条")
+    if first_round_exceeds_limit:
+        reasons.append(f"第一轮候选结果 {first_round_count} 条超过 {first_round_limit} 条或存在更多分页")
+    if not reasons:
+        reasons.append("需要进一步收敛候选结果")
+    return "；".join(reasons) + "，已按标题相关度和最近更新时间进行第二轮收敛"
 
 
 def merge_candidate_results(

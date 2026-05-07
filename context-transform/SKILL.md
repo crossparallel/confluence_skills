@@ -92,8 +92,8 @@ confluence_url: "cf.myhexin.com"
 
 - `用户名`：优先使用 `config.yaml` 中的 `username`，如果用户在本次请求中给出更具体名称，则使用用户指定值。
 - `记录日期`：使用当前本地日期，格式为 `YYYY-MM-DD`。
-- `使用模型参数`：根据当前运行上下文填写实际模型名；如果无法确认，写“待确认”。
-- `使用 Agent 类别`：根据当前运行上下文填写，例如 `codex`；如果无法确认，写“待确认”。
+- `使用模型参数`：根据本次实际运行上下文现场确认并填写实际模型名或模型参数；如果无法确认，写“待确认”，不要默认推断。
+- `使用 Agent 类别`：根据本次实际执行该任务的 agent 类型现场确认并填写；如果无法确认，写“待确认”，不要默认填写 `codex` 或其他固定值。
 - `文档写入位置`：优先使用 `config.yaml` 中的 `confluence_url`；如果用户指定了目标页面，以用户指定为准。
 
 ## 推荐工作流
@@ -104,9 +104,10 @@ confluence_url: "cf.myhexin.com"
 4. 区分已完成事项、进行中事项、待确认事项和后续建议。
 5. 生成带标题和元数据表的 Markdown 文档；正文结构根据用户是否指定文档类型决定。
 6. 默认将生成的 Markdown 文档写入 `context-transform/cache/`，文件名建议使用 `YYYY-MM-DD-简短英文主题.md`。
-7. 如果用户只要求查看内容，可以同时在回复中展示摘要或全文，但仍应保留 cache 文件作为后续上传输入。
+7. 如果用户只要求查看内容，可以同时在回复中展示摘要或全文，但仍应保留 cache 文件作为上传输入。
 8. 生成后检查结构、事实完整性和敏感信息暴露风险。
-9. 文档创建完成后，提示 agent 默认继续调用 `confluence-upload`，将刚写入 `context-transform/cache/` 的最新 Markdown 文档上传到 Confluence，在配置的根页面下创建新页面并写入内容。
+9. 文档创建完成后，默认继续调用 `confluence-upload`，将刚写入 `context-transform/cache/` 的最新 Markdown 文档上传到 Confluence，在配置的根页面下创建新页面并写入内容。
+10. 只有当用户明确提及“本地总结”“只生成本地文件”“无需上传”“不要上传”等含义时，才停止在本地文件，不调用 `confluence-upload`。
 
 ## 文档结构生成规则
 
@@ -164,6 +165,7 @@ confluence_url: "cf.myhexin.com"
 - 从用户的工作记录视角撰写，避免写成“助手执行了……”。
 - 不编造缺失事实；缺失信息写“待确认”。
 - 重要的文件路径、命令、配置名、接口名和日期要具体记录。
+- 引用 Confluence 页面来源时，必须优先给出可直接访问的链接，使用 Markdown 链接格式 `[页面标题](页面URL)`；页面 ID 只能作为辅助信息，不要只给页面 ID。
 - 对失败尝试、异常、限制和绕行方式做客观说明。
 - 使用表格呈现元数据、任务清单、问题清单、决策对比或风险列表。
 - 只记录与文档目标相关的上下文，避免把无关聊天内容写入文档。
@@ -193,7 +195,7 @@ python confluence-upload/confluence_upload.py upload-latest-context
 python confluence-upload/confluence_upload.py upload-latest-context --title "文档标题"
 ```
 
-如果用户只要求生成文档、不要求上传，应在最终回复中提示最新 Markdown 文件路径，并说明可以继续使用 `confluence-upload` 上传。
+默认情况下，生成文档后应直接继续上传。只有用户明确提及本地总结、只生成本地文件、无需上传或不要上传时，才在最终回复中提示最新 Markdown 文件路径，并说明本次未上传。
 
 ## 质量检查
 

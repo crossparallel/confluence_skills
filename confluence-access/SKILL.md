@@ -210,7 +210,7 @@ confluence-access/cache/page-<page_id>.json
 
 搜索或列表结果只展示关键信息：标题、页面 ID、作者、空间 key/name、URL、版本号、最近更新时间。
 
-搜索类任务默认先执行候选检索，再根据命中数量决定是否需要用户确认。第一阶段只检索候选页面元数据；如果第一阶段完全相关结果不超过 20 个，可以直接读取这些页面正文并总结，不需要用户确认，也不需要第二轮搜索。只有第一阶段完全相关结果大于 20 个时，才进入第二轮候选收敛，并在用户看过候选列表、明确下一步指示后读取具体页面内容。
+搜索类任务默认先执行候选检索，再根据命中数量决定是否需要用户确认。第一阶段只检索候选页面元数据；如果第一阶段完全相关结果不超过 20 个，且初始候选合并去重后不超过 50 个，可以直接读取这些页面正文并总结，不需要用户确认，也不需要第二轮搜索。只要第一阶段完全相关结果大于 20 个，或初始候选结果大于 50 个，就必须进入第二轮候选收敛，并在用户看过候选列表、明确下一步指示后读取具体页面内容。
 
 第一阶段必须执行两种候选检索：
 
@@ -219,9 +219,9 @@ confluence-access/cache/page-<page_id>.json
 
 第一阶段输出需要合并去重，只汇总标题、页面 ID、作者、空间、URL、版本、最近更新时间和匹配来源。
 
-如果第一阶段搜到的“完全相关”结果不超过 20 个，直接对这些完全相关页面调用 `get-page --summary` 读取正文并总结。优先使用 `search-page-candidates` 返回的 `autoReadPageIds` 作为直接读取范围。
+如果第一阶段搜到的“完全相关”结果不超过 20 个，且初始候选合并去重后不超过 50 个，直接对这些完全相关页面调用 `get-page --summary` 读取正文并总结。优先使用 `search-page-candidates` 返回的 `autoReadPageIds` 作为直接读取范围。
 
-如果第一阶段搜到的“完全相关”结果大于 20 个，需要先进行第二轮候选收敛；第二轮仍只读取候选元数据，不读取正文。优先使用 `search-page-candidates`，它会返回 `needsSecondRound`、`canReadDirectly`、`autoReadPageIds`、`exactRelevantCount`、`firstRound` 和必要时的 `secondRound` 结果。
+如果第一阶段搜到的“完全相关”结果大于 20 个，或初始候选合并去重后大于 50 个，需要先进行第二轮候选收敛；第二轮仍只读取候选元数据，不读取正文。优先使用 `search-page-candidates`，它会返回 `needsSecondRound`、`canReadDirectly`、`autoReadPageIds`、`exactRelevantCount`、`firstRoundResultCount`、`firstRoundExceedsLimit`、`firstRound` 和必要时的 `secondRound` 结果。
 
 只有进入第二轮候选收敛时，才需要等待用户根据候选列表给出下一步指示。读取页面后，回答必须基于实际页面内容，用正常文段语言总结；不要把完整 JSON 原始结果作为默认回复。
 
