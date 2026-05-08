@@ -205,23 +205,35 @@ confluence-access/cache/page-<page_id>.json
 
 搜索或列表结果只展示关键信息：标题、页面 ID、作者、空间 key/name、URL、版本号、最近更新时间。
 
-搜索类任务默认采用 Search-Read-Reflect-Refine 循环，由 agent 根据任务目标自行迭代搜索、读取、反思和细化。不要依赖固定两轮搜索策略。
+搜索类任务默认采用 Search-Read-Extract-Reflect-Refine 循环，由 agent 根据任务目标自行迭代搜索、读取、提炼、反思和细化。不要依赖固定两轮搜索策略。
 
 循环方式：
 
 - **Search**：用 `search-pages`、`search-by-title`、`search-cql`、`list-pages`、`list-children` 等基础命令定位候选页面。搜索或列表结果只展示关键信息：标题、页面 ID、作者、空间、URL、版本号、最近更新时间。
 - **Read**：读取最相关、最可能回答问题的页面正文。优先使用 `get-page --summary`，必要时读取多个互补页面。
-- **Reflect**：基于已读内容判断是否足够回答用户问题，显式检查信息是否缺失、范围是否不完整、来源是否过旧、不同页面之间是否存在冲突或矛盾。
-- **Refine**：如果仍有缺失、冲突、矛盾或证据不足，根据已掌握信息调整下一步搜索词、空间、标题词、CQL 条件或页面层级，再回到 Search。
+- **Extract**：每轮读取后必须先整理可检索的关键信息，再进入下一轮。至少整理以下内容：
+	- 关键词：业务术语、系统名、模块名、流程动作词、别名/缩写、中英文同义词。
+	- 编号类线索：需求号、项目号、工单号、发布版本号、规则编号、页面 ID、空间 key、Jira issue key。
+	- 业务语境：适用部门/团队、上下游系统、场景边界、时间范围（例如季度、发布日期）、地域或环境（生产/测试）。
+	- 实体关系：页面中出现的“系统-流程-角色-产物”关系，以及父子页面或跨平台链接（Confluence/Jira）。
+	- 冲突与不确定点：术语歧义、版本不一致、口径冲突、待确认字段。
+	将提炼结果整合为“下一轮检索包”：`must_terms`（必须命中）、`optional_terms`（可选扩展）、`exclude_terms`（需排除歧义）、`id_candidates`（编号候选）、`scope_hints`（空间/层级限制）。
+- **Reflect**：基于提炼结果判断是否足够回答用户问题，显式检查信息是否缺失、范围是否不完整、来源是否过旧、不同页面之间是否存在冲突或矛盾。
+- **Refine**：如果仍有缺失、冲突、矛盾或证据不足，必须使用上一轮“下一轮检索包”重写查询：
+	- 优先把 `must_terms + id_candidates` 组合到标题搜索或 CQL 精确条件。
+	- 用 `scope_hints` 收窄空间、父子页面层级或时间范围。
+	- 用 `exclude_terms` 排除高频噪声词或歧义主题。
+	- 再用 `optional_terms` 扩展召回，补充可能遗漏页面。
+	完成后再回到 Search。
 
 ## 跨平台连续追踪
 
 同一个搜索任务中可以连续调用 `confluence-access` 和 `jira-access`。
 
-- 如果在 Confluence 页面正文、链接、表格、附件说明或页面标题中发现 Jira issue 链接、issue key、Jira 项目 key 或明确的 Jira 查询线索，可以切换使用 `jira-access` 继续搜索或读取对应 Jira 内容。
+- 如果在 Confluence 页面正文、链接、表格、附件说明或页面标题中发现 Jira issue 链接、issue key、Jira 项目 key 或明确的 Jira 查询线索，应把这些编号加入当前轮 `id_candidates`，然后切换使用 `jira-access` 继续搜索或读取对应 Jira 内容。
 - 切换到 Jira 后，应保留来源链路，例如“Confluence 页面 A 指向 Jira issue B”，并在最终回答中说明信息来自哪个平台。
 - 不需要因为跨平台而重新询问用户；只要该 Jira 内容明显有助于回答当前问题，就可以继续访问。
-- 如果 Jira 内容又反向指向 Confluence 页面，也可以再切回 `confluence-access`，直到 Search-Read-Reflect-Refine 循环满足停止条件。
+- 如果 Jira 内容又反向指向 Confluence 页面，也可以再切回 `confluence-access`，直到 Search-Read-Extract-Reflect-Refine 循环满足停止条件。
 
 停止条件：
 
@@ -247,7 +259,8 @@ confluence-access/cache/page-<page_id>.json
 1. 如果不确定配置是否正确，先运行 `check-config`。
 2. 根据用户问题构造第一组搜索词，使用 `search-pages`、`search-by-title` 或 `search-cql` 定位候选页面。
 3. 读取最相关页面正文，并记录页面标题、URL、空间和页面 ID 作为来源。
-4. 反思已读内容是否满足问题：是否缺信息、是否只覆盖局部、是否存在时间版本差异、是否有冲突或矛盾。
-5. 如有缺失或冲突，调整搜索条件继续搜索和读取；必要时搜索同一空间的父子页面、相近标题、最近更新页面或明确的 CQL 条件。
-6. 重复 Search-Read-Reflect-Refine，直到认为结果足以回答，或确认剩余问题无法从可访问文档中消除。
-7. 汇总整理已读取页面的实际内容，用正常文段语言回答用户；只有用户追问来源、原始结果或 JSON 时，才返回完整 JSON 信息。
+4. 每轮读取后提炼关键信息：关键词、编号、业务语境、实体关系、冲突点，并整理成“下一轮检索包”（`must_terms`/`optional_terms`/`exclude_terms`/`id_candidates`/`scope_hints`）。
+5. 反思已读内容是否满足问题：是否缺信息、是否只覆盖局部、是否存在时间版本差异、是否有冲突或矛盾。
+6. 如有缺失或冲突，基于“下一轮检索包”重写搜索条件继续搜索和读取；必要时搜索同一空间的父子页面、相近标题、最近更新页面或明确的 CQL 条件。
+7. 重复 Search-Read-Extract-Reflect-Refine，直到认为结果足以回答，或确认剩余问题无法从可访问文档中消除。
+8. 汇总整理已读取页面的实际内容，用正常文段语言回答用户；只有用户追问来源、原始结果或 JSON 时，才返回完整 JSON 信息。
