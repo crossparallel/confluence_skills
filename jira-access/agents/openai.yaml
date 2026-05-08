@@ -1,0 +1,4 @@
+interface:
+  display_name: "Jira Access"
+  short_description: "Search and read Jira issues, projects, boards, sprints, and attachments."
+  default_prompt: "Use $jira-access to find and summarize relevant Jira issues or project data."

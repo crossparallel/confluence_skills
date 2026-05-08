@@ -1,6 +1,6 @@
 ---
 name: confluence-access
-description: Search, browse, retrieve, cache, and summarize Confluence spaces, pages, page hierarchies, comments, and attachments through a local Python helper script. Use when Codex needs to search Confluence documentation, read a page, list spaces/pages/children, inspect attachments, download content, answer questions grounded in Confluence pages, or cache retrieved Confluence content locally. 适用于用户要求“查 Confluence 文档”“读取 wiki 页面”“搜索空间或页面”“获取页面内容”“列出子页面或附件”“基于 Confluence 回答问题”等场景。Do not use for deleting pages/comments, changing permissions, modifying space settings, or any administrative Confluence operation.
+description: Search, browse, retrieve, cache, and summarize Confluence spaces, pages, page hierarchies, comments, and attachments through a local Python helper script. Use when Codex needs to search Confluence documentation, read a page, list spaces/pages/children, inspect attachments, download content, answer questions grounded in Confluence pages, or cache retrieved Confluence content locally. 适用于用户要求“查 Confluence 文档”“读取 wiki 页面”“在 cf 上查”“去 CF/Confluence 查”“搜索空间或页面”“在某个疑似 Confluence 空间、页面名称、wiki 名称或文档标题里查询”“获取页面内容”“列出子页面或附件”“基于 Confluence 回答问题”等场景。Do not use for deleting pages/comments, changing permissions, modifying space settings, or any administrative Confluence operation.
 ---
 
 # Confluence Access
@@ -20,6 +20,8 @@ description: Search, browse, retrieve, cache, and summarize Confluence spaces, p
 使用此 skill 处理以下任务：
 
 - 根据关键词、标题或 CQL 搜索 Confluence 页面。
+- 用户提到“在 cf 上查”“去 CF 查”“查 wiki”“查某个空间/页面/文档标题”等口语化需求。
+- 在用户给出的名称疑似 Confluence 空间 key、空间名称、页面标题、wiki 名称或文档标题时，先尝试用此 skill 搜索确认。
 - 查找或列出 Confluence 空间。
 - 读取指定页面内容，并基于页面内容回答问题。
 - 列出空间下的页面或某个页面的子页面。
@@ -211,6 +213,15 @@ confluence-access/cache/page-<page_id>.json
 - **Read**：读取最相关、最可能回答问题的页面正文。优先使用 `get-page --summary`，必要时读取多个互补页面。
 - **Reflect**：基于已读内容判断是否足够回答用户问题，显式检查信息是否缺失、范围是否不完整、来源是否过旧、不同页面之间是否存在冲突或矛盾。
 - **Refine**：如果仍有缺失、冲突、矛盾或证据不足，根据已掌握信息调整下一步搜索词、空间、标题词、CQL 条件或页面层级，再回到 Search。
+
+## 跨平台连续追踪
+
+同一个搜索任务中可以连续调用 `confluence-access` 和 `jira-access`。
+
+- 如果在 Confluence 页面正文、链接、表格、附件说明或页面标题中发现 Jira issue 链接、issue key、Jira 项目 key 或明确的 Jira 查询线索，可以切换使用 `jira-access` 继续搜索或读取对应 Jira 内容。
+- 切换到 Jira 后，应保留来源链路，例如“Confluence 页面 A 指向 Jira issue B”，并在最终回答中说明信息来自哪个平台。
+- 不需要因为跨平台而重新询问用户；只要该 Jira 内容明显有助于回答当前问题，就可以继续访问。
+- 如果 Jira 内容又反向指向 Confluence 页面，也可以再切回 `confluence-access`，直到 Search-Read-Reflect-Refine 循环满足停止条件。
 
 停止条件：
 

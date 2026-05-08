@@ -1,12 +1,13 @@
 # Skills 使用说明
 
-本目录包含三个本地 Codex skills，用于把当前工作上下文整理成文档、查询 Confluence 内容，并把生成的 Markdown 发布到 Confluence。
+本目录包含四个本地 Codex skills，用于把当前工作上下文整理成文档、查询 Confluence/Jira 内容，并把生成的 Markdown 发布到 Confluence。
 
 ```text
 skills/
 ├── confluence-access/
 ├── confluence-upload/
-└── context-transform/
+├── context-transform/
+└── jira-access/
 ```
 
 ## 1. 使用前准备
@@ -21,7 +22,8 @@ skills/
 C:\Users\<用户名>\.codex\skills\
 ├── confluence-access\
 ├── confluence-upload\
-└── context-transform\
+├── context-transform\
+└── jira-access\
 ```
 
 每个 skill 都必须保留自己的 `SKILL.md`：
@@ -30,12 +32,14 @@ C:\Users\<用户名>\.codex\skills\
 confluence-access/SKILL.md
 confluence-upload/SKILL.md
 context-transform/SKILL.md
+jira-access/SKILL.md
 ```
 
 agent 会通过 `SKILL.md` 中的 `name` 和 `description` 判断何时使用对应 skill。用户提问时也可以直接点名 skill，例如：
 
 ```text
 使用 confluence-access 查一下某个页面
+使用 jira-access 查一下某个 Jira 任务
 用 context-transform 生成本次工作记录
 用 confluence-upload 上传最新文档
 ```
@@ -127,7 +131,47 @@ python confluence_api.py get-page PAGE_ID --summary
 python confluence_api.py list-attachments PAGE_ID --limit 25
 ```
 
-### 2.2 context-transform
+### 2.2 jira-access
+
+`jira-access` 用于只读访问 Jira 内容，适合用户要求查询、搜索、读取、总结 Jira issue、项目、评论、附件、工作日志、board 或 sprint 时使用。
+
+主要能力：
+
+- 使用 JQL 或关键词搜索 Jira issue。
+- 读取 issue 详情、评论、附件列表和工作日志。
+- 列出项目、搜索用户、查看 Agile board 和 sprint。
+- 下载 issue 附件到本地文件。
+- 将读取到的 issue JSON 缓存到 `jira-access/cache/`。
+
+默认工作方式：
+
+1. 优先读取 `JIRA_BASE_URL`、`JIRA_USERNAME`、`JIRA_API_TOKEN`，缺失时读取 `jira-access/config.yaml`。
+2. 调用 `jira_api.py` 访问 Jira REST API。
+3. 使用 Search-Read-Reflect-Refine 循环搜索、读取、反思和细化。
+4. 检查是否存在缺失、冲突、矛盾或待确认内容。
+5. 默认用正常文段语言回答用户。
+6. 只有用户明确询问来源、原始结果、issue 元数据或要求 JSON 时，才返回完整 JSON 信息。
+
+重要限制：
+
+- 默认把 Jira 当作只读系统。
+- 不要删除 issue、评论或附件。
+- 不要修改工作流、权限、字段配置、项目设置或平台配置。
+- 只有用户明确要求并确认目标 issue 和内容时，才允许添加评论或上传附件。
+
+常用命令：
+
+```powershell
+cd C:\Users\KK\Desktop\skills\jira-access
+python jira_api.py check-config
+python jira_api.py search-jql "project = ABC ORDER BY updated DESC" --max-results 20
+python jira_api.py search-issues "登录失败" --project ABC --max-results 20
+python jira_api.py get-issue ABC-123 --summary
+python jira_api.py list-comments ABC-123
+python jira_api.py list-attachments ABC-123
+```
+
+### 2.3 context-transform
 
 `context-transform` 用于把当前对话、工作过程或本地上下文整理成企业可沉淀的 Markdown 文档。
 
@@ -172,7 +216,7 @@ python confluence_api.py list-attachments PAGE_ID --limit 25
 将当前上下文沉淀成 Confluence 文档
 ```
 
-### 2.3 confluence-upload
+### 2.4 confluence-upload
 
 `confluence-upload` 用于把本地 Markdown 文档发布到 Confluence，通常作为 `context-transform` 的后续步骤。
 
