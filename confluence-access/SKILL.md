@@ -109,12 +109,6 @@ python confluence_api.py search-cql 'text ~ "keyword" AND space = "SPACEKEY" AND
 python confluence_api.py search-by-title "Page Title" --space SPACEKEY
 ```
 
-第一轮候选搜索，不读取正文：
-
-```powershell
-python confluence_api.py search-page-candidates "keyword" --space SPACEKEY --limit 50
-```
-
 搜索空间：
 
 ```powershell
@@ -171,7 +165,6 @@ python confluence_api.py list-attachments PAGE_ID --limit 25
 ```json
 {"action":"search","cql":"text ~ \"keyword\" AND type = page","limit":10}
 {"action":"search_by_title","title":"Page Title","spaceKey":"SPACEKEY"}
-{"action":"search_page_candidates","keyword":"keyword","spaceKey":"SPACEKEY","limit":50,"exactThreshold":20}
 {"action":"get_page","pageId":"12345678"}
 {"action":"list_spaces","limit":50}
 {"action":"list_pages","spaceKey":"SPACEKEY","limit":25}
@@ -210,20 +203,22 @@ confluence-access/cache/page-<page_id>.json
 
 搜索或列表结果只展示关键信息：标题、页面 ID、作者、空间 key/name、URL、版本号、最近更新时间。
 
-搜索类任务默认先执行候选检索，再根据命中数量决定是否需要用户确认。第一阶段只检索候选页面元数据；如果第一阶段完全相关结果不超过 20 个，且初始候选合并去重后不超过 50 个，可以直接读取这些页面正文并总结，不需要用户确认。只要第一阶段完全相关结果大于 20 个，或初始候选结果大于 50 个，就不要自动进行第二轮搜索，也不要读取正文；应先读取 50+50 个候选结果的标题，从标题中提炼几个主要相关方向，提供给用户选择。
+搜索类任务默认采用 Search-Read-Reflect-Refine 循环，由 agent 根据任务目标自行迭代搜索、读取、反思和细化。不要依赖固定两轮搜索策略。
 
-第一阶段必须执行两种候选检索：
+循环方式：
 
-- 按相关程度搜索最多 50 条结果。
-- 按最近更新时间搜索最多 50 条结果。
+- **Search**：用 `search-pages`、`search-by-title`、`search-cql`、`list-pages`、`list-children` 等基础命令定位候选页面。搜索或列表结果只展示关键信息：标题、页面 ID、作者、空间、URL、版本号、最近更新时间。
+- **Read**：读取最相关、最可能回答问题的页面正文。优先使用 `get-page --summary`，必要时读取多个互补页面。
+- **Reflect**：基于已读内容判断是否足够回答用户问题，显式检查信息是否缺失、范围是否不完整、来源是否过旧、不同页面之间是否存在冲突或矛盾。
+- **Refine**：如果仍有缺失、冲突、矛盾或证据不足，根据已掌握信息调整下一步搜索词、空间、标题词、CQL 条件或页面层级，再回到 Search。
 
-第一阶段输出需要合并去重，只汇总标题、页面 ID、作者、空间、URL、版本、最近更新时间和匹配来源。
+停止条件：
 
-如果第一阶段搜到的“完全相关”结果不超过 20 个，且初始候选合并去重后不超过 50 个，直接对这些完全相关页面调用 `get-page --summary` 读取正文并总结。优先使用 `search-page-candidates` 返回的 `autoReadPageIds` 作为直接读取范围。
+- 已读取的页面内容能够覆盖用户问题的关键方面。
+- 主要事实有明确来源支持。
+- 已检查明显的缺失、冲突和矛盾；若仍无法消除，必须在回答中标注“不确定”“存在冲突”或“待确认”。
 
-如果第一阶段搜到的“完全相关”结果大于 20 个，或初始候选合并去重后大于 50 个，需要先展示 `directionSuggestions` 中的主要相关方向和代表性标题，让用户选择下一步方向。优先使用 `search-page-candidates`，它会返回 `needsUserDirection`、`canReadDirectly`、`autoReadPageIds`、`directionSuggestions`、`exactRelevantCount`、`firstRoundResultCount`、`firstRoundExceedsLimit` 和 `firstRound` 结果。
-
-只有用户根据方向建议给出下一步搜索方向后，才根据用户需求的内容类型执行第二轮细分搜索。第二轮细分搜索仍先返回候选元数据；若细分结果已足够明确，再读取具体页面内容并总结。读取页面后，回答必须基于实际页面内容，用正常文段语言总结；不要把完整 JSON 原始结果作为默认回复。
+读取页面后，回答必须基于实际页面内容，用正常文段语言总结；不要把完整 JSON 原始结果作为默认回复。
 
 只有当用户明确询问具体内容的来源、要求查看原始检索结果、要求核对页面元数据，或要求返回 JSON 时，才返回 JSON 格式的全部页面信息。需要说明来源时，可在文段回答中引用页面标题、页面 ID 或 URL；如果用户要求完整来源，再给出完整 JSON。
 
@@ -239,10 +234,9 @@ confluence-access/cache/page-<page_id>.json
 ## 推荐流程
 
 1. 如果不确定配置是否正确，先运行 `check-config`。
-2. 第一阶段用 `search-page-candidates` 定位候选页面，最多按相关程度 50 条、最近时间 50 条。
-3. 如果 `needsUserDirection` 为 `false`，直接读取 `autoReadPageIds` 中的页面正文并总结，不等待用户确认。
-4. 如果 `needsUserDirection` 为 `true`，展示 `directionSuggestions` 和代表性标题，让用户选择下一步搜索方向；此时不要进行第二轮搜索，也不要读取正文。
-5. 用户明确方向后，根据用户需求的内容类型组合关键词、空间、标题词或 CQL 条件执行第二轮细分搜索。
-6. 第二轮细分结果明确后，用 `get-page --summary` 读取具体正文。
-7. 必要时查看 `cache/` 中的页面 JSON。
-8. 汇总整理已读取页面的实际内容，用正常文段语言回答用户；只有用户追问来源、原始结果或 JSON 时，才返回完整 JSON 信息。
+2. 根据用户问题构造第一组搜索词，使用 `search-pages`、`search-by-title` 或 `search-cql` 定位候选页面。
+3. 读取最相关页面正文，并记录页面标题、URL、空间和页面 ID 作为来源。
+4. 反思已读内容是否满足问题：是否缺信息、是否只覆盖局部、是否存在时间版本差异、是否有冲突或矛盾。
+5. 如有缺失或冲突，调整搜索条件继续搜索和读取；必要时搜索同一空间的父子页面、相近标题、最近更新页面或明确的 CQL 条件。
+6. 重复 Search-Read-Reflect-Refine，直到认为结果足以回答，或确认剩余问题无法从可访问文档中消除。
+7. 汇总整理已读取页面的实际内容，用正常文段语言回答用户；只有用户追问来源、原始结果或 JSON 时，才返回完整 JSON 信息。

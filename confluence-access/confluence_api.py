@@ -257,102 +257,6 @@ class ConfluenceClient:
             cql_parts.append('space = "{0}"'.format(_escape_cql(space_key)))
         return self.search(" AND ".join(cql_parts), limit=limit, start=start)
 
-    def search_page_candidates(
-        self,
-        keyword: str,
-        limit: int = 50,
-        space_key: str | None = None,
-        exact_threshold: int = 20,
-    ) -> dict[str, Any]:
-        """执行第一轮候选搜索；宽泛结果只返回方向建议，不自动二轮搜索。"""
-        safe_limit = min(max(limit, 1), 50)
-        cql_parts = [
-            'text ~ "{0}"'.format(_escape_cql(keyword)),
-            "type = page",
-        ]
-        if space_key:
-            cql_parts.append('space = "{0}"'.format(_escape_cql(space_key)))
-
-        base_cql = " AND ".join(cql_parts)
-        metadata_expand = "content.space,content.history.createdBy,content.version"
-        relevance = self.search(base_cql, limit=safe_limit, expand=metadata_expand)
-        recent_cql, recent = self.search_by_last_modified(
-            base_cql,
-            limit=safe_limit,
-            expand=metadata_expand,
-        )
-        merged = merge_candidate_results(
-            [
-                ("relevance", relevance.get("results", [])),
-                ("recent", recent.get("results", [])),
-            ],
-            keyword,
-        )
-        exact_results = [result for result in merged if result.get("exactRelevant")]
-        first_round_count = len(merged)
-        first_round_exceeds_limit = (
-            first_round_count > safe_limit
-            or bool(relevance.get("hasMore"))
-            or bool(recent.get("hasMore"))
-        )
-        needs_user_direction = len(exact_results) > exact_threshold or first_round_exceeds_limit
-        auto_read_results = [] if needs_user_direction else exact_results
-        direction_suggestions = (
-            build_direction_suggestions(merged, keyword) if needs_user_direction else []
-        )
-
-        return {
-            "keyword": keyword,
-            "spaceKey": space_key,
-            "limitPerSearch": safe_limit,
-            "exactRelevantCount": len(exact_results),
-            "exactRelevantThreshold": exact_threshold,
-            "firstRoundResultCount": first_round_count,
-            "firstRoundResultLimit": safe_limit,
-            "firstRoundExceedsLimit": first_round_exceeds_limit,
-            "needsUserDirection": needs_user_direction,
-            "needsSecondRound": needs_user_direction,
-            "canReadDirectly": not needs_user_direction,
-            "autoReadPageIds": [
-                str(result["id"]) for result in auto_read_results if result.get("id")
-            ],
-            "directionSuggestions": direction_suggestions,
-            "firstRound": {
-                "relevanceCql": base_cql,
-                "recentCql": recent_cql,
-                "relevanceSize": len(relevance.get("results", [])),
-                "recentSize": len(recent.get("results", [])),
-                "results": merged,
-                "size": len(merged),
-            },
-            "secondRound": None,
-        }
-
-    def search_by_last_modified(
-        self,
-        base_cql: str,
-        limit: int = 50,
-        start: int = 0,
-        expand: str | None = None,
-    ) -> tuple[str, dict[str, Any]]:
-        """按最近更新时间搜索；兼容不同 Confluence 版本的字段大小写。"""
-        candidates = (
-            f"{base_cql} order by lastModified desc",
-            f"{base_cql} order by lastmodified desc",
-        )
-        first_error: ConfluenceApiError | None = None
-
-        for cql in candidates:
-            try:
-                return cql, self.search(cql, limit=limit, start=start, expand=expand)
-            except ConfluenceApiError as exc:
-                if first_error is None:
-                    first_error = exc
-
-        if first_error is not None:
-            raise first_error
-        raise ConfluenceApiError("Unable to build last modified search CQL")
-
     def search_by_title(
         self,
         title: str,
@@ -796,104 +700,6 @@ def slim_list(raw: dict[str, Any], base_url: str) -> dict[str, Any]:
     }
 
 
-def build_direction_suggestions(
-    candidates: list[dict[str, Any]],
-    keyword: str,
-    max_directions: int = 6,
-    max_examples: int = 5,
-) -> list[dict[str, Any]]:
-    """从第一轮候选标题中提炼主要相关方向，供用户选择。"""
-    keyword_tokens = set(extract_title_tokens(keyword))
-    groups: dict[str, list[dict[str, Any]]] = {}
-
-    for candidate in candidates:
-        title = str(candidate.get("title") or "")
-        tokens = [token for token in extract_title_tokens(title) if token not in keyword_tokens]
-        if not tokens:
-            tokens = extract_title_tokens(title)
-        direction = tokens[0] if tokens else "其他相关结果"
-        groups.setdefault(direction, []).append(candidate)
-
-    suggestions = []
-    for direction, items in groups.items():
-        examples = [
-            {
-                "id": item.get("id"),
-                "title": item.get("title"),
-                "spaceKey": item.get("spaceKey"),
-                "url": item.get("url"),
-            }
-            for item in items[:max_examples]
-        ]
-        suggestions.append(
-            {
-                "direction": direction,
-                "count": len(items),
-                "exampleTitles": [str(item.get("title")) for item in items[:max_examples]],
-                "examples": examples,
-            }
-        )
-
-    return sorted(suggestions, key=lambda item: item["count"], reverse=True)[:max_directions]
-
-
-def extract_title_tokens(text: str) -> list[str]:
-    """提取标题关键词，兼容中英文和常见技术命名。"""
-    stopwords = {
-        "and",
-        "the",
-        "for",
-        "with",
-        "from",
-        "page",
-        "wiki",
-        "confluence",
-        "文档",
-        "说明",
-        "汇总",
-        "记录",
-        "相关",
-        "问题",
-    }
-    tokens = re.findall(r"[\w\u4e00-\u9fff]{2,}", text.casefold())
-    return [token for token in tokens if token not in stopwords]
-
-
-def merge_candidate_results(
-    groups: list[tuple[str, list[dict[str, Any]]]],
-    keyword: str,
-) -> list[dict[str, Any]]:
-    """合并两轮候选搜索结果，保留来源标签并标注标题完全相关。"""
-    merged: dict[str, dict[str, Any]] = {}
-    normalized_keyword = keyword.casefold().strip()
-
-    for source, results in groups:
-        for index, result in enumerate(results, start=1):
-            page_id = str(result.get("id") or result.get("url") or result.get("title") or "")
-            if not page_id:
-                continue
-            candidate = merged.setdefault(page_id, dict(result))
-            sources = candidate.setdefault("matchSources", [])
-            if source not in sources:
-                sources.append(source)
-            ranks = candidate.setdefault("sourceRanks", {})
-            ranks[source] = index
-
-            title = str(candidate.get("title") or "")
-            candidate["exactRelevant"] = bool(
-                normalized_keyword and normalized_keyword in title.casefold()
-            )
-
-    return sorted(
-        merged.values(),
-        key=lambda item: (
-            not bool(item.get("exactRelevant")),
-            min((item.get("sourceRanks") or {}).values(), default=999999),
-            str(item.get("lastModifiedAt") or ""),
-        ),
-    )
-
-
 def build_web_url(item: dict[str, Any], base_url: str) -> str | None:
     """根据响应中的 webui 链接拼出可访问的页面地址。"""
     links = item.get("_links", {})
@@ -1020,13 +826,6 @@ def handle_json_command(command: dict[str, Any], config_path: Path = CONFIG_PATH
             int(command.get("limit", 10)),
             int(command.get("start", 0)),
         )
-    if action == "search_page_candidates":
-        return client.search_page_candidates(
-            str(command["keyword"]),
-            int(command.get("limit", 50)),
-            command.get("spaceKey") and str(command.get("spaceKey")),
-            int(command.get("exactThreshold", 20)),
-        )
     if action == "get_page":
         return client.get_page_summary(str(command["pageId"]))
     if action == "list_spaces":
@@ -1075,7 +874,6 @@ def handle_json_command(command: dict[str, Any], config_path: Path = CONFIG_PATH
         "check_config",
         "search",
         "search_by_title",
-        "search_page_candidates",
         "get_page",
         "list_spaces",
         "list_pages",
@@ -1115,17 +913,6 @@ def handle_search_by_title(args: argparse.Namespace) -> None:
             space_key=args.space,
             limit=args.limit,
             start=args.start,
-        )
-    )
-
-
-def handle_search_page_candidates(args: argparse.Namespace) -> None:
-    print_json(
-        build_client(args.config).search_page_candidates(
-            args.keyword,
-            limit=args.limit,
-            space_key=args.space,
-            exact_threshold=args.exact_threshold,
         )
     )
 
@@ -1277,26 +1064,6 @@ def build_parser() -> argparse.ArgumentParser:
     search_by_title.add_argument("--space", help="Optional Confluence space key.")
     add_paging_args(search_by_title, 10)
     search_by_title.set_defaults(handler=handle_search_by_title)
-
-    search_candidates = subparsers.add_parser(
-        "search-page-candidates",
-        help="First-round page search by relevance and recency without reading page bodies.",
-    )
-    search_candidates.add_argument("keyword", help="Keyword to search for.")
-    search_candidates.add_argument("--space", help="Optional Confluence space key.")
-    search_candidates.add_argument(
-        "--limit",
-        type=int,
-        default=50,
-        help="Maximum result count per search, capped at 50.",
-    )
-    search_candidates.add_argument(
-        "--exact-threshold",
-        type=int,
-        default=20,
-        help="Ask the user to choose a direction when exact relevant results exceed this count.",
-    )
-    search_candidates.set_defaults(handler=handle_search_page_candidates)
 
     search_spaces = subparsers.add_parser("search-spaces", help="Search spaces by keyword.")
     search_spaces.add_argument("keyword", help="Keyword to search for.")
