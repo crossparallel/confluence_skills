@@ -134,29 +134,42 @@ python jira_api.py list-sprint-issues SPRINT_ID
 {"action":"upload_attachment","issueKey":"ABC-123","filePath":"C:\\path\\file.log"}
 ```
 
-## Search-Read-Reflect-Refine 工作流
+## Search-Read-Extract-Reflect-Refine 工作流
 
-默认使用 Search-Read-Reflect-Refine 循环，由 agent 根据任务目标自行迭代搜索、读取、反思和细化。
+默认使用 Search-Read-Extract-Reflect-Refine 循环，由 agent 根据任务目标自行迭代搜索、读取、提炼、反思和细化。默认最大搜索轮次为 10 轮。
 
 - **Search**：使用 JQL、关键词、项目、状态、负责人、时间范围、组件、标签、board 或 sprint 定位候选 issue。
 - **Read**：读取最相关 issue 的详情、评论、附件列表和工作日志。必要时下载附件或读取多个相关 issue。
-- **Reflect**：判断是否足够回答用户问题，检查信息是否缺失、issue 状态是否过旧、评论和字段是否冲突、多个 issue 是否描述同一问题但结论不同。
-- **Refine**：如果仍有缺失或矛盾，调整 JQL、项目范围、关键词、时间范围、状态、标签、组件、关联 issue 或 sprint 继续搜索。
+- **Extract**：每轮读取后必须先整理可检索的关键信息，再进入下一轮。至少整理以下内容：
+	- 关键词：业务术语、系统名、模块名、流程动作词、别名/缩写、中英文同义词。
+	- 编号类线索：issue key、项目 key、epic key、版本号、组件名、sprint 名称、工单号、Confluence 页面 ID 或空间 key。
+	- 业务语境：适用部门/团队、上下游系统、场景边界、时间范围（迭代、发布日期）、环境（生产/测试）。
+	- 实体关系：issue 之间的关联类型（blocks/duplicates/relates to）、负责人、报告人、评论中提及的人或系统。
+	- 冲突与不确定点：字段值歧义、版本不一致、评论口径冲突、待确认字段。
+	将提炼结果整合为"下一轮检索包"：`must_terms`（必须命中）、`optional_terms`（可选扩展）、`exclude_terms`（需排除歧义）、`id_candidates`（编号候选）、`scope_hints`（项目/sprint/状态限制）。
+- **Reflect**：基于提炼结果判断是否足够回答用户问题，检查信息是否缺失、issue 状态是否过旧、评论和字段是否冲突、多个 issue 是否描述同一问题但结论不同。
+- **Refine**：如果仍有缺失或矛盾，必须使用上一轮"下一轮检索包"重写查询：
+	- 优先把 `must_terms + id_candidates` 组合到 JQL 精确条件。
+	- 用 `scope_hints` 收窄项目、sprint、状态或时间范围。
+	- 用 `exclude_terms` 排除高频噪声词或歧义主题。
+	- 再用 `optional_terms` 扩展召回，补充可能遗漏 issue。
+	完成后再回到 Search。
 
 ## 跨平台连续追踪
 
 同一个搜索任务中可以连续调用 `jira-access` 和 `confluence-access`。
 
-- 如果在 Jira issue 描述、评论、附件名、链接字段、worklog 备注或关联内容中发现 Confluence 页面链接、wiki 页面标题、空间 key 或明确的 Confluence 查询线索，可以切换使用 `confluence-access` 继续搜索或读取对应文档。
-- 切换到 Confluence 后，应保留来源链路，例如“Jira issue ABC-123 指向 Confluence 页面 X”，并在最终回答中说明信息来自哪个平台。
+- 如果在 Jira issue 描述、评论、附件名、链接字段、worklog 备注或关联内容中发现 Confluence 页面链接、wiki 页面标题、空间 key 或明确的 Confluence 查询线索，应把这些编号加入当前轮 `id_candidates`，然后切换使用 `confluence-access` 继续搜索或读取对应文档。
+- 切换到 Confluence 后，应保留来源链路，例如"Jira issue ABC-123 指向 Confluence 页面 X"，并在最终回答中说明信息来自哪个平台。
 - 不需要因为跨平台而重新询问用户；只要该 Confluence 内容明显有助于回答当前问题，就可以继续访问。
-- 如果 Confluence 内容又反向指向 Jira issue，也可以再切回 `jira-access`，直到 Search-Read-Reflect-Refine 循环满足停止条件。
+- 如果 Confluence 内容又反向指向 Jira issue，也可以再切回 `jira-access`，直到 Search-Read-Extract-Reflect-Refine 循环满足停止条件。
 
 停止条件：
 
 - 已读取内容能够覆盖用户问题的关键方面。
 - 主要事实有明确 issue、评论或附件来源支持。
-- 已检查明显缺失、冲突和矛盾；若仍无法消除，必须在回答中标注“不确定”“存在冲突”或“待确认”。
+- 已检查明显缺失、冲突和矛盾；若仍无法消除，必须在回答中标注"不确定""存在冲突"或"待确认"。
+- 当循环达到 10 轮上限仍需继续时，必须先询问用户"是否继续搜索"；仅在用户明确同意后才能继续后续轮次。若用户不同意，则基于当前证据给出阶段性结论并标注未解决点。
 
 ## 回答规范
 

@@ -14,7 +14,7 @@ skills/
 
 ### 1.1 Agent 本地配置
 
-使用前需要确保 agent 能发现本目录下的 skills。推荐做法是将三个 skill 目录放在 Codex 本地 skills 目录中，或确保当前运行环境把本目录作为 skills 根目录加载。
+使用前需要确保 agent 能发现本目录下的 skills。推荐做法是将四个 skill 目录放在本地 skills 目录中，或确保当前运行环境把本目录作为 skills 根目录加载。
 
 常见本地目录结构：
 
@@ -46,7 +46,7 @@ agent 会通过 `SKILL.md` 中的 `name` 和 `description` 判断何时使用对
 
 ### 1.2 Python 运行环境
 
-三个 skill 的脚本使用 Python 运行。请先确认本机可执行：
+四个 skill 的脚本使用 Python 运行。请先确认本机可执行：
 
 ```powershell
 python --version
@@ -61,13 +61,13 @@ python confluence_api.py check-config
 
 ### 1.3 敏感信息管理
 
-`config.yaml` 中会包含用户名、API token、Confluence 地址和页面 ID。不要把真实 token、密码或内部地址提交到公开仓库。
+`config.yaml` 中会包含用户名、API token、Confluence/Jira 地址和页面 ID。不要把真实 token、密码或内部地址提交到公开仓库。
 
 建议只在本机配置真实值，对外共享时保留占位符。
 
 ### 1.4 可选配置方式
 
-三个 skill 的配置都支持两种来源，优先级如下：
+这些 skill 的配置都支持两种来源，优先级如下：
 
 1. 本地环境变量
 2. 同目录下的 `config.yaml`
@@ -78,6 +78,9 @@ python confluence_api.py check-config
 CONFLUENCE_USERNAME
 CONFLUENCE_API_TOKEN
 CONFLUENCE_BASE_URL
+JIRA_BASE_URL
+JIRA_USERNAME
+JIRA_API_TOKEN
 ```
 
 约定如下：
@@ -90,7 +93,14 @@ CONFLUENCE_BASE_URL
 
 如果环境变量和 `config.yaml` 同时存在，环境变量优先覆盖。
 
-## 2. 三个 Skills 的主要功能
+Jira 约定如下：
+
+- `JIRA_BASE_URL` 填 Jira 基础地址，例如 `https://your-domain.atlassian.net`。
+- `JIRA_USERNAME` 填 Jira 账号邮箱。
+- `JIRA_API_TOKEN` 填 Jira API token 或 PAT。
+- `jira-access` 鉴权方式为 Bearer：`Authorization: Bearer <JIRA_API_TOKEN>`。
+
+## 2. 四个 Skills 的主要功能
 
 ### 2.1 confluence-access
 
@@ -147,7 +157,7 @@ python confluence_api.py list-attachments PAGE_ID --limit 25
 
 1. 优先读取 `JIRA_BASE_URL`、`JIRA_USERNAME`、`JIRA_API_TOKEN`，缺失时读取 `jira-access/config.yaml`。
 2. 调用 `jira_api.py` 访问 Jira REST API。
-3. 使用 Search-Read-Reflect-Refine 循环搜索、读取、反思和细化。
+3. 使用 Search-Read-Extract-Reflect-Refine 循环搜索、读取、提炼、反思和细化。
 4. 检查是否存在缺失、冲突、矛盾或待确认内容。
 5. 默认用正常文段语言回答用户。
 6. 只有用户明确询问来源、原始结果、issue 元数据或要求 JSON 时，才返回完整 JSON 信息。
@@ -169,7 +179,38 @@ python jira_api.py search-issues "登录失败" --project ABC --max-results 20
 python jira_api.py get-issue ABC-123 --summary
 python jira_api.py list-comments ABC-123
 python jira_api.py list-attachments ABC-123
+python jira_api.py list-worklogs ABC-123
+python jira_api.py list-boards --project ABC
+python jira_api.py list-sprints BOARD_ID
+python jira_api.py list-board-issues BOARD_ID --jql "assignee = currentUser()"
+python jira_api.py list-sprint-issues SPRINT_ID
 ```
+
+常用 JSON actions：
+
+```json
+{"action":"search","jql":"project = ABC ORDER BY updated DESC","maxResults":20}
+{"action":"search_issues","keyword":"登录失败","projectKey":"ABC","maxResults":20}
+{"action":"get_issue","issueKey":"ABC-123"}
+{"action":"list_projects"}
+{"action":"get_project","projectKey":"ABC"}
+{"action":"list_comments","issueKey":"ABC-123"}
+{"action":"list_attachments","issueKey":"ABC-123"}
+{"action":"list_worklogs","issueKey":"ABC-123"}
+{"action":"search_users","query":"zhangsan"}
+{"action":"list_boards","projectKey":"ABC"}
+{"action":"list_sprints","boardId":"12"}
+{"action":"list_board_issues","boardId":"12","jql":"assignee = currentUser()"}
+{"action":"list_sprint_issues","sprintId":"34"}
+```
+
+脚本中也提供 `add_comment` 和 `upload_attachment` 写入 action，但只有用户明确要求并确认目标 issue 和内容时才可使用。
+
+缓存行为：
+
+- 通过 `get-issue` 或 JSON action `get_issue` 读取 issue 时，会自动把 issue JSON 保存到 `jira-access/cache/issue-<issue_key>.json`。
+- 后续任务需要查看同一 issue 时，可以优先读取缓存。
+- 如果用户强调内容必须最新，需要重新调用 Jira API 刷新缓存。
 
 ### 2.3 context-transform
 
@@ -290,7 +331,46 @@ python confluence_api.py list-spaces --limit 5
 
 如果返回 `401`，通常是账号或 token 错误。如果返回 `403`，通常是账号权限不足。
 
-### 3.2 context-transform/config.yaml
+### 3.2 jira-access/config.yaml
+
+用于查询和读取 Jira。鉴权方式为 Bearer：
+
+```text
+Authorization: Bearer <JIRA_API_TOKEN>
+```
+
+配置示例：
+
+```yaml
+# Jira 账号邮箱。
+username: "your-email@example.com"
+
+# Jira API token 或 PAT。
+api-token: "your-api-token"
+
+# Jira 基础地址。
+base_url: "https://your-domain.atlassian.net"
+```
+
+也可以优先通过环境变量提供：
+
+```text
+JIRA_BASE_URL
+JIRA_USERNAME
+JIRA_API_TOKEN
+```
+
+配置完成后验证：
+
+```powershell
+cd C:\Users\KK\Desktop\skills\jira-access
+python jira_api.py check-config
+python jira_api.py list-projects
+```
+
+如果返回 `401`，通常是账号或 token 错误。如果返回 `403`，通常是账号权限不足，或当前账号没有对应项目、issue、board、sprint 的访问权限。
+
+### 3.3 context-transform/config.yaml
 
 用于生成 Markdown 文档时填充稳定元数据。
 
@@ -324,7 +404,7 @@ confluence_url: "https://your-confluence.example.com"
 
 如果某个值暂时无法确认，agent 应在生成文档时写“待确认”，不要编造。
 
-### 3.3 confluence-upload/config.yaml
+### 3.4 confluence-upload/config.yaml
 
 用于把 Markdown 上传到 Confluence。鉴权方式为 Bearer：
 
@@ -378,7 +458,24 @@ python confluence_upload.py ensure-user-page
 -> 仅在用户追问来源或 JSON 时返回完整 JSON
 ```
 
-### 4.2 生成文档并上传 Confluence
+### 4.2 查询 Jira 并回答问题
+
+适用 skill：`jira-access`
+
+```text
+用户提问
+-> agent 使用 JQL、关键词、项目、状态、负责人、board 或 sprint 定位候选 issue
+-> agent 读取相关 issue、评论、附件列表和工作日志
+-> agent 提炼关键词、编号线索、业务语境、实体关系、冲突和不确定点
+-> 如果证据不足，基于提炼结果改写查询并继续搜索
+-> agent 汇总 issue 状态、时间先后、关系和来源
+-> agent 用正常文段语言回答
+-> 仅在用户追问来源或 JSON 时返回完整 JSON
+```
+
+Jira 和 Confluence 可以连续追踪：如果 Jira issue 中出现 Confluence 页面链接、空间 key、页面标题或文档线索，可以切换到 `confluence-access` 继续读取；如果 Confluence 页面又反向指向 Jira issue，也可以再切回 `jira-access`。最终回答中应说明信息来自哪个平台。
+
+### 4.3 生成文档并上传 Confluence
 
 适用 skills：`context-transform` + `confluence-upload`
 
@@ -418,6 +515,16 @@ python confluence-upload\confluence_upload.py upload-latest-context
 - 当前账号是否有目标空间或页面权限。
 - 内网 Confluence 是否需要 VPN 或公司网络。
 
+### 查询 Jira 失败
+
+优先检查：
+
+- `base_url` 是否正确。
+- token 是否过期或权限不足。
+- 当前账号是否有目标项目、issue、board 或 sprint 权限。
+- JQL 是否有语法错误，项目 key、issue key、状态、组件、标签是否真实存在。
+- 内网 Jira 是否需要 VPN 或公司网络。
+
 ### 上传 Confluence 失败
 
 优先检查：
@@ -435,6 +542,7 @@ python confluence-upload\confluence_upload.py upload-latest-context
 
 - 不要在公开文档中泄露 token、密码、密钥或内部凭证。
 - `confluence-access` 默认只读，不要修改或删除已有 Confluence 页面。
+- `jira-access` 默认只读，不要删除 issue、评论、附件、项目、工作流或权限配置。
 - `confluence-upload` 只用于创建新页面，不用于覆盖已有页面。
 - 生成文档时，不要记录与任务无关的敏感个人信息。
 - 用户未明确要求时，不返回完整 JSON 原始结果。
