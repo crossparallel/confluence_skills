@@ -109,7 +109,7 @@ Jira 约定如下：
 主要能力：
 
 - 按关键词、标题或 CQL 搜索 Confluence 页面。
-- 默认执行 views-ranked 两阶段搜索：相关度前 50 + 更新时间前 50，读取候选页面 Page Information 中的浏览量，按 views 选择 Top 5。
+- 默认执行 views-ranked 两阶段搜索：相关度前 50 + 更新时间前 50，读取候选页面 metadata 中的浏览量，按 views 选择 Top 5。
 - 查找或列出 Confluence 空间。
 - 读取指定页面内容，并基于实际页面回答问题。
 - 列出空间下页面、页面子页面和页面附件。
@@ -121,7 +121,7 @@ Jira 约定如下：
 1. 读取 `confluence-access/config.yaml`。
 2. 调用 `confluence_api.py` 访问 Confluence REST API。
 3. 使用 `search-pages` 或 `search-cql` 执行默认搜索流程：按相关度召回最多 50 条，按更新时间召回最多 50 条，合并去重。
-4. 对候选页面并发请求轻量 Page Information 页面 `pages/viewinfo.action?pageId=...`，只解析浏览量，不下载正文。
+4. 从搜索结果 expanded metadata 中解析浏览量；缺失时并发请求 `content/{pageId}?expand=metadata` 和必要时的 content properties，只解析元数据，不下载正文。
 5. 按 views 选择 Top 5 页面并读取正文。
 6. 对读取到的相关页面信息进行汇总整理。
 7. 默认用正常文段语言回答用户。

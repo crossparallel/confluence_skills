@@ -255,10 +255,11 @@ class ConfluenceClient:
         top_limit = clamp_int(top_limit, minimum=1, maximum=recall_limit * 2)
 
         base_cql = strip_cql_order_by(cql)
-        relevance = self.search(base_cql, limit=recall_limit)
+        relevance = self.search(base_cql, limit=recall_limit, expand="metadata")
         recent = self.search(
             with_cql_order_by(base_cql, "lastmodified DESC"),
             limit=recall_limit,
+            expand="metadata",
         )
         candidates = merge_search_results(
             [
@@ -455,43 +456,79 @@ class ConfluenceClient:
         return slim_list(raw, self.base_url)
 
     def get_page_views(self, page_id: str, strict: bool = True) -> dict[str, Any]:
-        """Return view count by reading the lightweight Page Information HTML."""
-        url = self._build_page_info_url(page_id)
+        """Return view count by reading Confluence content metadata only."""
         try:
-            html = self._request_text_url("GET", url)
+            page = self._get_api(
+                f"/content/{urllib.parse.quote(page_id)}",
+                {"expand": "metadata"},
+            )
         except ConfluenceApiError as exc:
             if strict:
                 raise ConfluenceApiError(
-                    f"Page views unavailable for {page_id} from page info HTML: {exc}"
+                    f"Page metadata unavailable for {page_id}: {exc}"
                 ) from exc
             return {
                 "id": page_id,
                 "views": None,
                 "viewsAvailable": False,
-                "viewsSource": "page-info-html",
-                "viewsUrl": url,
+                "viewsSource": "content-metadata",
                 "viewsError": str(exc),
             }
 
-        views = extract_view_count_from_text(html)
-        if views is None:
-            message = "page-info-html: no recognizable views value in page information HTML"
-            if strict:
-                raise ConfluenceApiError(f"Page views unavailable for {page_id}: {message}")
+        metadata = page.get("metadata") or {}
+        views = extract_view_count_from_metadata(metadata)
+        if views is not None:
+            return {
+                "id": str(page.get("id") or page_id),
+                "views": views,
+                "viewsAvailable": True,
+                "viewsSource": "content-metadata",
+            }
+
+        property_result = self._get_page_views_from_metadata_properties(page_id)
+        if property_result.get("viewsAvailable"):
+            return property_result
+
+        message = property_result.get("viewsError") or "metadata did not contain a view count"
+        if strict:
+            raise ConfluenceApiError(f"Page views unavailable for {page_id}: {message}")
+        return {
+            "id": page_id,
+            "views": None,
+            "viewsAvailable": False,
+            "viewsSource": "content-metadata",
+            "viewsError": str(message),
+        }
+
+    def _get_page_views_from_metadata_properties(self, page_id: str) -> dict[str, Any]:
+        try:
+            response = self._get_api(
+                f"/content/{urllib.parse.quote(page_id)}/property",
+                {"limit": "200"},
+            )
+        except ConfluenceApiError as exc:
             return {
                 "id": page_id,
                 "views": None,
                 "viewsAvailable": False,
-                "viewsSource": "page-info-html",
-                "viewsUrl": url,
-                "viewsError": message,
+                "viewsSource": "content-metadata-properties",
+                "viewsError": str(exc),
+            }
+
+        views = extract_view_count_from_metadata(response)
+        if views is None:
+            return {
+                "id": page_id,
+                "views": None,
+                "viewsAvailable": False,
+                "viewsSource": "content-metadata-properties",
+                "viewsError": "metadata properties did not contain a view count",
             }
         return {
             "id": page_id,
             "views": views,
             "viewsAvailable": True,
-            "viewsSource": "page-info-html",
-            "viewsUrl": url,
+            "viewsSource": "content-metadata-properties",
         }
 
     def get_pages_views(self, page_ids: list[str], strict: bool = False) -> dict[str, Any]:
@@ -527,20 +564,17 @@ class ConfluenceClient:
                         "id": page_id,
                         "views": None,
                         "viewsAvailable": False,
-                        "viewsSource": "page-info-html",
-                        "viewsUrl": self._build_page_info_url(page_id),
+                        "viewsSource": "content-metadata",
                         "viewsError": str(exc),
                     }
         return [results_by_id[page_id] for page_id in page_ids if page_id in results_by_id]
 
-    def _build_page_info_url(self, page_id: str) -> str:
-        return (
-            f"{self.base_url}/pages/viewinfo.action?"
-            f"pageId={urllib.parse.quote(str(page_id))}"
-        )
-
     def add_views_to_pages(self, pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        page_ids = [str(page.get("id")) for page in pages if page.get("id")]
+        page_ids = [
+            str(page.get("id"))
+            for page in pages
+            if page.get("id") and not page.get("viewsAvailable")
+        ]
         views_by_id = {
             item["id"]: item
             for item in self.get_pages_views(page_ids, strict=False).get("results", [])
@@ -551,10 +585,16 @@ class ConfluenceClient:
             page_id = str(page.get("id") or "")
             views = views_by_id.get(page_id, {})
             enriched_page = {**page}
-            enriched_page["views"] = views.get("views")
-            enriched_page["viewsAvailable"] = bool(views.get("viewsAvailable"))
-            if views.get("viewsError"):
+            if "views" not in enriched_page:
+                enriched_page["views"] = views.get("views")
+            enriched_page["viewsAvailable"] = bool(
+                enriched_page.get("viewsAvailable") or views.get("viewsAvailable")
+            )
+            if views.get("viewsSource") and not enriched_page.get("viewsSource"):
+                enriched_page["viewsSource"] = views.get("viewsSource")
+            if views.get("viewsError") and not enriched_page.get("viewsAvailable"):
                 enriched_page["viewsError"] = views.get("viewsError")
+            enriched_page.pop("_metadata", None)
             enriched.append(enriched_page)
         return enriched
 
@@ -881,7 +921,7 @@ def slim_page(item: dict[str, Any], base_url: str) -> dict[str, Any]:
     created_by = history.get("createdBy") or {}
     version = item.get("version") or content.get("version") or {}
     space = item.get("space") or content.get("space") or {}
-    return {
+    result = {
         "id": item.get("id") or content.get("id"),
         "title": item.get("title") or content.get("title"),
         "type": item.get("type") or content.get("type"),
@@ -895,6 +935,15 @@ def slim_page(item: dict[str, Any], base_url: str) -> dict[str, Any]:
         or (version.get("by") or {}).get("username"),
         "url": build_web_url(item, base_url),
     }
+    metadata = item.get("metadata") or content.get("metadata")
+    if metadata:
+        result["_metadata"] = metadata
+        views = extract_view_count_from_metadata(metadata)
+        if views is not None:
+            result["views"] = views
+            result["viewsAvailable"] = True
+            result["viewsSource"] = "search-metadata"
+    return result
 
 
 def slim_space(space: dict[str, Any], base_url: str) -> dict[str, Any]:
@@ -954,11 +1003,25 @@ def merge_search_results(
 
 
 def extract_view_count(raw: dict[str, Any]) -> int | None:
-    direct = extract_view_count_from_value(raw)
+    return extract_view_count_from_metadata(raw)
+
+
+def extract_view_count_from_metadata(metadata: Any) -> int | None:
+    direct = extract_view_count_from_value(metadata)
     if direct is not None:
         return direct
-    for key in ("count", "views", "viewCount", "totalViews", "totalViewCount"):
-        value = find_nested_key(raw, key)
+    for key in (
+        "views",
+        "viewCount",
+        "totalViews",
+        "totalViewCount",
+        "pageViews",
+        "pageViewCount",
+        "numberOfViews",
+        "viewed",
+        "count",
+    ):
+        value = find_nested_key(metadata, key)
         count = extract_view_count_from_value(value)
         if count is not None:
             return count
@@ -993,22 +1056,6 @@ def find_nested_key(value: Any, target_key: str) -> Any:
             found = find_nested_key(item, target_key)
             if found is not None:
                 return found
-    return None
-
-
-def extract_view_count_from_text(text: str) -> int | None:
-    patterns = [
-        r'"(?:viewCount|views|totalViews|totalViewCount)"\s*:\s*"?([0-9][0-9,]*)"?',
-        r'data-(?:view-count|views)\s*=\s*"([0-9][0-9,]*)"',
-        r'([0-9][0-9,]*)\s+(?:views|viewers|page views|times viewed)',
-        r'(?:views|page views|viewed|viewed by|viewed this page)\D{0,60}([0-9][0-9,]*)',
-        r'([0-9][0-9,]*)\s*(?:次)?(?:浏览|查看|访问)',
-        r'(?:浏览|查看|访问)(?:次数)?\D{0,60}([0-9][0-9,]*)',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match:
-            return int(match.group(1).replace(",", ""))
     return None
 
 
@@ -1634,7 +1681,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     get_page_views = subparsers.add_parser(
         "get-page-views",
-        help="Get a page view count from the lightweight Page Information HTML.",
+        help="Get a page view count from Confluence content metadata.",
     )
     get_page_views.add_argument("page_id", help="Confluence page ID.")
     get_page_views.set_defaults(handler=handle_get_page_views)
