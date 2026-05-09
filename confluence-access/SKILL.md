@@ -1,6 +1,6 @@
 ---
 name: confluence-access
-description: Search, browse, retrieve, cache, and summarize Confluence spaces, pages, page hierarchies, comments, and attachments through a local Python helper script. Use when Codex needs to search Confluence documentation, read a page, list spaces/pages/children, inspect attachments, download content, answer questions grounded in Confluence pages, or cache retrieved Confluence content locally. 适用于用户要求“查 Confluence 文档”“读取 wiki 页面”“在 cf 上查”“去 CF/Confluence 查”“搜索空间或页面”“在某个疑似 Confluence 空间、页面名称、wiki 名称或文档标题里查询”“获取页面内容”“列出子页面或附件”“基于 Confluence 回答问题”等场景。Do not use for deleting pages/comments, changing permissions, modifying space settings, or any administrative Confluence operation.
+description: Search, browse, retrieve, cache, and summarize Confluence spaces, pages, page hierarchies, comments, and attachments through a local Python helper script. For normal page-search tasks, use the views-ranked two-stage workflow by default: recall up to 50 relevance results and 50 recent results, fetch views for candidates, then read the top 5 by views. Use when Codex needs to search Confluence documentation, read a page, list spaces/pages/children, inspect attachments, download content, answer questions grounded in Confluence pages, or cache retrieved Confluence content locally. 适用于用户要求“查 Confluence 文档”“读取 wiki 页面”“在 cf 上查”“去 CF/Confluence 查”“搜索空间或页面”“在某个疑似 Confluence 空间、页面名称、wiki 名称或文档标题里查询”“获取页面内容”“列出子页面或附件”“基于 Confluence 回答问题”等场景。Do not use for deleting pages/comments, changing permissions, modifying space settings, or any administrative Confluence operation.
 ---
 
 # Confluence Access
@@ -8,6 +8,20 @@ description: Search, browse, retrieve, cache, and summarize Confluence spaces, p
 当用户需要查找、访问、读取、总结或本地缓存 Confluence 内容时，使用这个 skill。
 
 核心脚本是 [confluence_api.py](confluence_api.py)。脚本从同目录的 [config.yaml](config.yaml) 读取鉴权配置，调用 Confluence REST API，并把读取到的页面 JSON 缓存在 [cache/](cache/) 目录下。
+
+## 默认搜索工作流
+
+只要任务需要“搜索 Confluence 页面并读取内容”，每一轮搜索都必须使用 views-ranked 两阶段流程。脚本已经把 `search-pages`、`search-cql` 和 JSON action `search` 改成默认执行这个流程；不要用原始搜索结果直接挑页面读取，除非 analytics/views API 不可用、用户明确要求不用 views，或任务只是调试/列出原始候选。
+
+默认流程：
+
+1. 根据当前搜索目标构造关键词或 CQL。
+2. 调用 `search-pages "keyword" --space SPACEKEY` 或 `search-cql 'CQL'`。这两个命令默认会按相关度召回最多 50 条、按更新时间召回最多 50 条，并合并去重。
+3. 脚本读取候选页面 views，选择 views 最高的 5 条。
+4. 脚本默认读取这 5 条页面正文，并返回 `topResults` 和 `pages`。
+5. 对 `pages` 执行 Extract / Reflect / Refine，生成下一轮搜索目标；下一轮继续调用 `search-pages` 或 `search-cql`，不要退回 raw 搜索。
+
+只有调试、确认 CQL、analytics/views 不可用时回退，或用户明确要求原始候选列表时，才使用 `--raw`、`search-pages-raw`、`search-cql-raw` 或 JSON action `search_raw`。
 
 ## 绝对禁止
 
@@ -45,6 +59,7 @@ description: Search, browse, retrieve, cache, and summarize Confluence spaces, p
 CONFLUENCE_USERNAME
 CONFLUENCE_API_TOKEN
 CONFLUENCE_BASE_URL
+CONFLUENCE_VIEWS_ENDPOINT_TEMPLATE
 ```
 
 约定：
@@ -52,6 +67,7 @@ CONFLUENCE_BASE_URL
 - `CONFLUENCE_USERNAME` 填邮箱。
 - `confluence-access` 会把它作为鉴权账号使用完整邮箱。
 - 如果没有环境变量，再读取 `config.yaml`。
+- Data Center 没有稳定公开的页面 views REST API。若实例有内部 analytics 或插件接口，可配置 `views_endpoint_template` / `CONFLUENCE_VIEWS_ENDPOINT_TEMPLATE`，模板支持 `{page_id}`、`{raw_page_id}`、`{base_url}`，例如 `http://cf.example.com/rest/custom/{page_id}/views`。
 
 `config.yaml` 示例：
 
@@ -59,6 +75,7 @@ CONFLUENCE_BASE_URL
 username: "your-email-or-username"
 api-token: "your-api-token"
 base_url: "https://your-confluence.example.com"
+views_endpoint_template: "https://your-confluence.example.com/rest/custom/{page_id}/views"
 ```
 
 鉴权方式固定为：
@@ -93,35 +110,42 @@ JSON 管道方式：
 
 ## 常用只读命令
 
-按关键词搜索页面：
+默认搜索入口（搜索页面并准备读取正文时使用）：
 
 ```powershell
-python confluence_api.py search-pages "keyword" --space SPACEKEY --limit 10
-```
-
-使用原始 CQL 搜索：
-
-```powershell
+python confluence_api.py search-pages "keyword" --space SPACEKEY
 python confluence_api.py search-cql 'text ~ "keyword" AND space = "SPACEKEY" AND type = page'
 ```
 
-按相关度和更新时间各召回最多 50 条、补充 views 后取浏览量最高的页面：
+上面两个命令会执行完整默认搜索流程：按相关度召回最多 50 条、按更新时间召回最多 50 条、合并去重、读取候选 views、选择 views 最高的 5 条，并默认读取这 5 条正文。需要只看 Top 5 元数据时加 `--no-read-top`。
+
+显式 views-ranked 命令（等价于默认搜索入口，可用于强调参数）：
 
 ```powershell
-python confluence_api.py search-ranked-by-views 'text ~ "keyword" AND space = "SPACEKEY" AND type = page' --recall-limit 50 --top-limit 5
-python confluence_api.py search-ranked-by-views 'text ~ "keyword" AND type = page' --read-top
+python confluence_api.py search-pages-ranked-by-views "keyword" --space SPACEKEY --recall-limit 50 --top-limit 5
+python confluence_api.py search-ranked-by-views 'text ~ "keyword" AND type = page' --recall-limit 50 --top-limit 5
 ```
 
-按标题搜索页面：
+低层 raw 搜索命令（只用于调试、确认 CQL、analytics/views 不可用时的回退，或用户明确要求查看原始候选列表）：
+
+按关键词搜索页面，不读取 views 或正文：
+
+```powershell
+python confluence_api.py search-pages "keyword" --space SPACEKEY --raw --limit 10
+python confluence_api.py search-pages-raw "keyword" --space SPACEKEY --limit 10
+```
+
+使用原始 CQL 搜索，不读取 views 或正文：
+
+```powershell
+python confluence_api.py search-cql 'text ~ "keyword" AND space = "SPACEKEY" AND type = page' --raw
+python confluence_api.py search-cql-raw 'text ~ "keyword" AND space = "SPACEKEY" AND type = page'
+```
+
+按标题搜索页面，不读取 views：
 
 ```powershell
 python confluence_api.py search-by-title "Page Title" --space SPACEKEY
-```
-
-按关键词执行 views 排序搜索：
-
-```powershell
-python confluence_api.py search-pages-ranked-by-views "keyword" --space SPACEKEY --read-top
 ```
 
 搜索空间：
@@ -155,6 +179,8 @@ python confluence_api.py get-page-views PAGE_ID
 python confluence_api.py get-pages-views PAGE_ID_1 PAGE_ID_2 PAGE_ID_3
 ```
 
+在 Data Center 中，`get-page-views` 会依次尝试已配置的自定义 endpoint、常见内部 analytics REST 路径、Cloud 兼容路径，以及页面 HTML 中可能暴露的 views 值。若都不可用，会返回 `viewsAvailable: false` 和失败原因；不要把不可用当作 views 为 0。
+
 读取页面：
 
 ```powershell
@@ -185,7 +211,8 @@ python confluence_api.py list-attachments PAGE_ID --limit 25
 常用只读 action：
 
 ```json
-{"action":"search","cql":"text ~ \"keyword\" AND type = page","limit":10}
+{"action":"search","cql":"text ~ \"keyword\" AND type = page"}
+{"action":"search_raw","cql":"text ~ \"keyword\" AND type = page","limit":10}
 {"action":"search_ranked_by_views","cql":"text ~ \"keyword\" AND type = page","recallLimit":50,"topLimit":5,"readTop":true}
 {"action":"search_pages_ranked_by_views","keyword":"keyword","spaceKey":"SPACEKEY","recallLimit":50,"topLimit":5,"readTop":true}
 {"action":"search_by_title","title":"Page Title","spaceKey":"SPACEKEY"}
@@ -227,15 +254,17 @@ confluence-access/cache/page-<page_id>.json
 
 ## 回答规范
 
-搜索或列表结果只展示关键信息：标题、页面 ID、作者、空间 key/name、URL、版本号、最近更新时间；当本轮流程需要排序候选时，可额外展示 views。
+搜索或列表结果只展示关键信息：标题、页面 ID、作者、空间 key/name、URL、版本号、最近更新时间；参与默认搜索流程的候选还必须包含 views 或 views 不可用原因。
 
 搜索类任务默认采用 Search-Read-Extract-Reflect-Refine 循环，由 agent 根据任务目标自行迭代搜索、读取、提炼、反思和细化。默认最大搜索轮次为 10 轮，不要依赖固定两轮搜索策略。
 
+**强制默认规则**：只要任务需要“搜索 Confluence 页面并读取内容”，每一轮 Search 都必须执行 views-ranked 两阶段流程。`search-pages`、`search-cql` 和 JSON action `search` 已经默认执行该流程并读取 Top 5 页面正文。不要用 `--raw`、`search-pages-raw`、`search-cql-raw` 或 `search_raw` 的前几条结果进入 Read，除非 analytics/views API 不可用、用户明确要求不用 views，或任务只是调试/列出原始搜索结果。若跳过 views，必须在回答或工作记录中说明原因。
+
 循环方式：
 
-- **Search 阶段一（双路召回）**：根据当前搜索目标构造 CQL 或关键词查询。优先使用 `search-ranked-by-views` 或 `search-pages-ranked-by-views`；其内部会取按相关程度排序的前最多 50 条结果，并取按更新时间排序的前最多 50 条结果，合并去重后形成最多 100 条候选。若需要手动执行，分别使用普通 CQL 搜索和带 `ORDER BY lastmodified DESC` 的 CQL 搜索。
+- **Search 阶段一（双路召回）**：根据当前搜索目标构造 CQL 或关键词查询。默认使用 `search-pages` 或 `search-cql`；其内部会取按相关程度排序的前最多 50 条结果，并取按更新时间排序的前最多 50 条结果，合并去重后形成最多 100 条候选。若需要手动执行，分别使用 raw CQL 搜索和带 `ORDER BY lastmodified DESC` 的 raw CQL 搜索。
 - **Search 阶段二（views 排序）**：对阶段一候选批量读取 views 浏览量，按 views 从高到低选择最多 5 条结果。只对这 5 条获取完整文档内容，进入后续分析。若 analytics/views API 不可用，说明限制，并退化为基于相关度、更新时间和标题/空间线索选择最多 5 条读取。
-- **Read**：读取阶段二选出的最多 5 个页面正文。优先使用 `search-ranked-by-views --read-top` / `search-pages-ranked-by-views --read-top` 一次完成；需要精确控制时使用 `get-page --summary` 逐页读取。
+- **Read**：读取阶段二选出的最多 5 个页面正文。默认 `search-pages` / `search-cql` 会一次完成；需要精确控制时使用 `--no-read-top` 只返回 Top 5 元数据，再用 `get-page --summary` 逐页读取。
 - **Extract**：每轮读取后必须先整理可检索的关键信息，再进入下一轮。至少整理以下内容：
 	- 关键词：业务术语、系统名、模块名、流程动作词、别名/缩写、中英文同义词。
 	- 编号类线索：需求号、项目号、工单号、发布版本号、规则编号、页面 ID、空间 key、Jira issue key。
@@ -283,7 +312,7 @@ confluence-access/cache/page-<page_id>.json
 ## 推荐流程
 
 1. 如果不确定配置是否正确，先运行 `check-config`。
-2. 根据用户问题构造第一组搜索词，优先使用 `search-pages-ranked-by-views` 或 `search-ranked-by-views` 执行两阶段搜索：相关度前 50 + 更新时间前 50，合并后补 views，取 views 最高的 5 条。
+2. 根据用户问题构造第一组搜索词，使用 `search-pages` 或 `search-cql` 执行默认两阶段搜索：相关度前 50 + 更新时间前 50，合并后补 views，取 views 最高的 5 条并读取正文。除非 views 不可用或用户明确要求，否则不要用 raw 搜索结果直接选页面读取。
 3. 读取这 5 条页面正文，并记录页面标题、URL、空间、页面 ID 和 views 作为来源线索；如果 views 不可用，记录不可用原因并退化为读取最相关/最新的最多 5 条。
 4. 每轮读取后提炼关键信息：关键词、编号、业务语境、实体关系、冲突点，并整理成“下一轮检索包”（`must_terms`/`optional_terms`/`exclude_terms`/`id_candidates`/`scope_hints`）。
 5. 反思已读内容是否满足问题：是否缺信息、是否只覆盖局部、是否存在时间版本差异、是否有冲突或矛盾。

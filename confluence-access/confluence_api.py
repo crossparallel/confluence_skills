@@ -151,6 +151,7 @@ def _load_env_config() -> dict[str, str]:
     username = os.getenv("CONFLUENCE_USERNAME")
     api_token = os.getenv("CONFLUENCE_API_TOKEN")
     base_url = os.getenv("CONFLUENCE_BASE_URL")
+    views_endpoint_template = os.getenv("CONFLUENCE_VIEWS_ENDPOINT_TEMPLATE")
 
     if username:
         data["username"] = username.strip()
@@ -158,6 +159,8 @@ def _load_env_config() -> dict[str, str]:
         data["api-token"] = api_token
     if base_url:
         data["base_url"] = base_url
+    if views_endpoint_template:
+        data["views_endpoint_template"] = views_endpoint_template
 
     return data
 
@@ -173,11 +176,14 @@ def _validate_config(data: Any, config_path: Path) -> dict[str, str]:
         missing = ", ".join(missing_keys)
         raise ConfluenceApiError(f"Missing required config value(s): {missing}")
 
-    return {
+    config = {
         "username": str(data["username"]).strip(),
         "api-token": str(data["api-token"]),
         "base_url": str(data["base_url"]).rstrip("/"),
     }
+    if data.get("views_endpoint_template"):
+        config["views_endpoint_template"] = str(data["views_endpoint_template"]).strip()
+    return config
 
 
 def check_config(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
@@ -213,6 +219,7 @@ class ConfluenceClient:
 
     def __init__(self, config: dict[str, str]) -> None:
         self.base_url = config["base_url"].rstrip("/")
+        self.views_endpoint_template = config.get("views_endpoint_template", "").strip()
         # 与附件脚本保持一致：有 PAT 时发送 Bearer token。
         self.headers = {
             "Authorization": build_auth_header(config["username"], config["api-token"]),
@@ -275,6 +282,12 @@ class ConfluenceClient:
             "cql": base_cql,
             "recallLimit": recall_limit,
             "topLimit": top_limit,
+            "workflow": "views-ranked-two-stage-search",
+            "workflowReminder": (
+                "Use topResults/pages for Read-Extract-Reflect. For the next search round, "
+                "call search-cql or search-pages again; raw search is only for debugging or "
+                "when views are unavailable."
+            ),
             "relevance": {
                 "size": len(relevance.get("results", [])),
                 "hasMore": relevance.get("hasMore"),
@@ -447,25 +460,124 @@ class ConfluenceClient:
         return slim_list(raw, self.base_url)
 
     def get_page_views(self, page_id: str, strict: bool = True) -> dict[str, Any]:
-        """Return view count for a page when the Confluence analytics API is available."""
-        try:
-            raw = self._get_api(
-                f"/analytics/content/{urllib.parse.quote(page_id)}/views"
+        """Return view count for a page when an analytics source is available."""
+        errors: list[str] = []
+        attempts = self._build_views_attempts(page_id)
+        for attempt_name, url in attempts:
+            try:
+                raw = self._request_json_url("GET", url)
+            except ConfluenceApiError as exc:
+                errors.append(f"{attempt_name}: {exc}")
+                continue
+
+            views = extract_view_count(raw)
+            if views is not None:
+                return {
+                    "id": page_id,
+                    "views": views,
+                    "viewsAvailable": True,
+                    "viewsSource": attempt_name,
+                }
+            errors.append(f"{attempt_name}: response did not contain a view count")
+
+        html_result = self._get_page_views_from_html(page_id)
+        if html_result.get("viewsAvailable"):
+            return html_result
+        if html_result.get("viewsError"):
+            errors.append(str(html_result["viewsError"]))
+
+        if strict:
+            detail = "; ".join(errors) if errors else "no views endpoints configured"
+            raise ConfluenceApiError(f"Page views unavailable for {page_id}: {detail}")
+        return {
+            "id": page_id,
+            "views": None,
+            "viewsAvailable": False,
+            "viewsError": "; ".join(errors) if errors else "no views endpoints configured",
+        }
+
+    def _build_views_attempts(self, page_id: str) -> list[tuple[str, str]]:
+        encoded_page_id = urllib.parse.quote(page_id)
+        attempts: list[tuple[str, str]] = []
+        if self.views_endpoint_template:
+            attempts.append(
+                (
+                    "configured",
+                    self.views_endpoint_template.format(
+                        page_id=encoded_page_id,
+                        raw_page_id=page_id,
+                        base_url=self.base_url,
+                    ),
+                )
             )
+        attempts.extend(
+            [
+                (
+                    "data-center-analytics-content-views",
+                    f"{self.base_url}/rest/analytics/1.0/content/{encoded_page_id}/views",
+                ),
+                (
+                    "data-center-analytics-page",
+                    f"{self.base_url}/rest/analytics/1.0/publish/page/{encoded_page_id}",
+                ),
+                (
+                    "data-center-confluence-analytics-content",
+                    f"{self.base_url}/rest/confluence-analytics/1.0/content/{encoded_page_id}/views",
+                ),
+                (
+                    "cloud-analytics-content-views",
+                    f"{self.base_url}/wiki/rest/api/analytics/content/{encoded_page_id}/views",
+                ),
+                (
+                    "rest-api-analytics-content-views",
+                    f"{self.base_url}/rest/api/analytics/content/{encoded_page_id}/views",
+                ),
+            ]
+        )
+        return attempts
+
+    def _get_page_views_from_html(self, page_id: str) -> dict[str, Any]:
+        try:
+            page = self.get_page(page_id, expand="space")
         except ConfluenceApiError as exc:
-            if strict:
-                raise
             return {
                 "id": page_id,
                 "views": None,
                 "viewsAvailable": False,
-                "viewsError": str(exc),
+                "viewsError": f"html-page-lookup: {exc}",
             }
 
+        url = build_web_url(page, self.base_url)
+        if not url:
+            return {
+                "id": page_id,
+                "views": None,
+                "viewsAvailable": False,
+                "viewsError": "html-page-lookup: page web URL unavailable",
+            }
+
+        try:
+            html = self._request_text_url("GET", url)
+        except ConfluenceApiError as exc:
+            return {
+                "id": page_id,
+                "views": None,
+                "viewsAvailable": False,
+                "viewsError": f"html-page: {exc}",
+            }
+        views = extract_view_count_from_text(html)
+        if views is None:
+            return {
+                "id": page_id,
+                "views": None,
+                "viewsAvailable": False,
+                "viewsError": "html-page: no recognizable views value in page HTML",
+            }
         return {
-            "id": str(raw.get("id") or page_id),
-            "views": extract_view_count(raw),
+            "id": page_id,
+            "views": views,
             "viewsAvailable": True,
+            "viewsSource": "html-page",
         }
 
     def get_pages_views(self, page_ids: list[str], strict: bool = False) -> dict[str, Any]:
@@ -662,6 +774,10 @@ class ConfluenceClient:
     def _get_api(self, api_path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         return self._request_json("GET", api_path, params=params)
 
+    def _get_api_url(self, url: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+        query = f"?{urllib.parse.urlencode(params)}" if params else ""
+        return self._request_json_url("GET", f"{url}{query}")
+
     def _post_api(self, api_path: str, payload: Any) -> dict[str, Any]:
         body = json.dumps(payload).encode("utf-8")
         return self._request_json(
@@ -697,6 +813,44 @@ class ConfluenceClient:
         """向 Confluence REST API 发送请求并解析 JSON 响应。"""
         query = f"?{urllib.parse.urlencode(params)}" if params else ""
         url = f"{self.base_url}/rest/api{api_path}{query}"
+        return self._request_json_url(
+            method,
+            url,
+            body=body,
+            extra_headers=extra_headers,
+        )
+
+    def _request_json_url(
+        self,
+        method: str,
+        url: str,
+        body: bytes | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        response_body = self._request_text_url(
+            method,
+            url,
+            body=body,
+            extra_headers=extra_headers,
+        )
+
+        if not response_body or not response_body.strip():
+            return {}
+        try:
+            return json.loads(response_body)
+        except json.JSONDecodeError as exc:
+            preview = response_body[:500].replace("\n", "\\n")
+            raise ConfluenceApiError(
+                f"Confluence API returned non-JSON or incorrectly encoded content: {preview}"
+            ) from exc
+
+    def _request_text_url(
+        self,
+        method: str,
+        url: str,
+        body: bytes | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> str:
         headers = {**self.headers, **(extra_headers or {})}
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
 
@@ -711,15 +865,7 @@ class ConfluenceClient:
         except urllib.error.URLError as exc:
             raise ConfluenceApiError(f"Confluence API request failed: {exc.reason}") from exc
 
-        if not response_body or not response_body.strip():
-            return {}
-        try:
-            return json.loads(response_body)
-        except json.JSONDecodeError as exc:
-            preview = response_body[:500].replace("\n", "\\n")
-            raise ConfluenceApiError(
-                f"Confluence API returned non-JSON or incorrectly encoded content: {preview}"
-            ) from exc
+        return response_body
 
 
 def decode_response_body(
@@ -856,12 +1002,59 @@ def merge_search_results(
 
 
 def extract_view_count(raw: dict[str, Any]) -> int | None:
-    for key in ("count", "views", "viewCount"):
-        value = raw.get(key)
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and value.isdigit():
-            return int(value)
+    direct = extract_view_count_from_value(raw)
+    if direct is not None:
+        return direct
+    for key in ("count", "views", "viewCount", "totalViews", "totalViewCount"):
+        value = find_nested_key(raw, key)
+        count = extract_view_count_from_value(value)
+        if count is not None:
+            return count
+    return None
+
+
+def extract_view_count_from_value(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        normalized = value.replace(",", "").strip()
+        if normalized.isdigit():
+            return int(normalized)
+    if isinstance(value, dict):
+        for key in ("count", "value", "total", "views", "viewCount"):
+            count = extract_view_count_from_value(value.get(key))
+            if count is not None:
+                return count
+    return None
+
+
+def find_nested_key(value: Any, target_key: str) -> Any:
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            if str(key).casefold() == target_key.casefold():
+                return nested_value
+            found = find_nested_key(nested_value, target_key)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = find_nested_key(item, target_key)
+            if found is not None:
+                return found
+    return None
+
+
+def extract_view_count_from_text(text: str) -> int | None:
+    patterns = [
+        r'"(?:viewCount|views|totalViews|totalViewCount)"\s*:\s*"?([0-9][0-9,]*)"?',
+        r'data-(?:view-count|views)\s*=\s*"([0-9][0-9,]*)"',
+        r'([0-9][0-9,]*)\s+(?:views|viewers|page views)',
+        r'(?:views|page views)\D{0,40}([0-9][0-9,]*)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1).replace(",", ""))
     return None
 
 
@@ -999,6 +1192,13 @@ def handle_json_command(command: dict[str, Any], config_path: Path = CONFIG_PATH
     client = build_client(config_path)
 
     if action == "search":
+        return client.search_ranked_by_views(
+            str(command["cql"]),
+            int(command.get("recallLimit", command.get("limit", 50))),
+            int(command.get("topLimit", 5)),
+            bool(command.get("readTop", True)),
+        )
+    if action == "search_raw":
         return client.search(
             str(command["cql"]),
             int(command.get("limit", 10)),
@@ -1080,6 +1280,7 @@ def handle_json_command(command: dict[str, Any], config_path: Path = CONFIG_PATH
     supported_actions = [
         "check_config",
         "search",
+        "search_raw",
         "search_ranked_by_views",
         "search_pages_ranked_by_views",
         "search_by_title",
@@ -1103,7 +1304,18 @@ def handle_check_config(args: argparse.Namespace) -> None:
 
 
 def handle_search_cql(args: argparse.Namespace) -> None:
-    print_json(build_client(args.config).search(args.cql, limit=args.limit, start=args.start))
+    client = build_client(args.config)
+    if args.raw:
+        print_json(client.search(args.cql, limit=args.limit, start=args.start))
+    else:
+        print_json(
+            client.search_ranked_by_views(
+                args.cql,
+                recall_limit=args.recall_limit,
+                top_limit=args.top_limit,
+                read_top=args.read_top,
+            )
+        )
 
 
 def handle_search_ranked_by_views(args: argparse.Namespace) -> None:
@@ -1118,14 +1330,26 @@ def handle_search_ranked_by_views(args: argparse.Namespace) -> None:
 
 
 def handle_search_pages(args: argparse.Namespace) -> None:
-    print_json(
-        build_client(args.config).search_pages(
-            args.keyword,
-            limit=args.limit,
-            space_key=args.space,
-            start=args.start,
+    client = build_client(args.config)
+    if args.raw:
+        print_json(
+            client.search_pages(
+                args.keyword,
+                limit=args.limit,
+                space_key=args.space,
+                start=args.start,
+            )
         )
-    )
+    else:
+        print_json(
+            client.search_pages_ranked_by_views(
+                args.keyword,
+                recall_limit=args.recall_limit,
+                space_key=args.space,
+                top_limit=args.top_limit,
+                read_top=args.read_top,
+            )
+        )
 
 
 def handle_search_pages_ranked_by_views(args: argparse.Namespace) -> None:
@@ -1136,6 +1360,21 @@ def handle_search_pages_ranked_by_views(args: argparse.Namespace) -> None:
             space_key=args.space,
             top_limit=args.top_limit,
             read_top=args.read_top,
+        )
+    )
+
+
+def handle_search_cql_raw(args: argparse.Namespace) -> None:
+    print_json(build_client(args.config).search(args.cql, limit=args.limit, start=args.start))
+
+
+def handle_search_pages_raw(args: argparse.Namespace) -> None:
+    print_json(
+        build_client(args.config).search_pages(
+            args.keyword,
+            limit=args.limit,
+            space_key=args.space,
+            start=args.start,
         )
     )
 
@@ -1275,6 +1514,32 @@ def add_paging_args(parser: argparse.ArgumentParser, default_limit: int) -> None
     parser.add_argument("--start", type=int, default=0, help="Result offset.")
 
 
+def add_ranked_search_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--recall-limit",
+        type=int,
+        default=50,
+        help="Maximum results to recall per relevance/recency pass, capped at 50.",
+    )
+    parser.add_argument(
+        "--top-limit",
+        type=int,
+        default=5,
+        help="Maximum view-ranked results to return.",
+    )
+    parser.add_argument(
+        "--read-top",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fetch summary content for the top view-ranked pages.",
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Use the legacy lightweight search without views or page-body reads.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Search and manage Confluence spaces/pages using Basic auth."
@@ -1290,9 +1555,13 @@ def build_parser() -> argparse.ArgumentParser:
     check_config_parser = subparsers.add_parser("check-config", help="Validate config file.")
     check_config_parser.set_defaults(handler=handle_check_config)
 
-    search_cql = subparsers.add_parser("search-cql", help="Search pages with raw CQL.")
+    search_cql = subparsers.add_parser(
+        "search-cql",
+        help="Run the default views-ranked search workflow for a raw CQL query.",
+    )
     search_cql.add_argument("cql", help="Confluence CQL expression.")
     add_paging_args(search_cql, 10)
+    add_ranked_search_args(search_cql)
     search_cql.set_defaults(handler=handle_search_cql)
 
     search_ranked = subparsers.add_parser(
@@ -1314,15 +1583,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     search_ranked.add_argument(
         "--read-top",
-        action="store_true",
-        help="Also fetch summary content for the top view-ranked pages.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fetch summary content for the top view-ranked pages.",
     )
     search_ranked.set_defaults(handler=handle_search_ranked_by_views)
 
-    search_pages = subparsers.add_parser("search-pages", help="Search pages by keyword.")
+    search_pages = subparsers.add_parser(
+        "search-pages",
+        help="Run the default views-ranked search workflow by keyword.",
+    )
     search_pages.add_argument("keyword", help="Keyword to search for.")
     search_pages.add_argument("--space", help="Optional Confluence space key.")
     add_paging_args(search_pages, 10)
+    add_ranked_search_args(search_pages)
     search_pages.set_defaults(handler=handle_search_pages)
 
     search_pages_ranked = subparsers.add_parser(
@@ -1345,10 +1619,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     search_pages_ranked.add_argument(
         "--read-top",
-        action="store_true",
-        help="Also fetch summary content for the top view-ranked pages.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fetch summary content for the top view-ranked pages.",
     )
     search_pages_ranked.set_defaults(handler=handle_search_pages_ranked_by_views)
+
+    search_cql_raw = subparsers.add_parser(
+        "search-cql-raw",
+        help="Legacy lightweight CQL search without views ranking or page-body reads.",
+    )
+    search_cql_raw.add_argument("cql", help="Confluence CQL expression.")
+    add_paging_args(search_cql_raw, 10)
+    search_cql_raw.set_defaults(handler=handle_search_cql_raw)
+
+    search_pages_raw = subparsers.add_parser(
+        "search-pages-raw",
+        help="Legacy lightweight keyword search without views ranking or page-body reads.",
+    )
+    search_pages_raw.add_argument("keyword", help="Keyword to search for.")
+    search_pages_raw.add_argument("--space", help="Optional Confluence space key.")
+    add_paging_args(search_pages_raw, 10)
+    search_pages_raw.set_defaults(handler=handle_search_pages_raw)
 
     search_by_title = subparsers.add_parser("search-by-title", help="Search pages by title.")
     search_by_title.add_argument("title", help="Page title or title keyword.")
