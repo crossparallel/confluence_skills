@@ -105,10 +105,23 @@ python confluence_api.py search-pages "keyword" --space SPACEKEY --limit 10
 python confluence_api.py search-cql 'text ~ "keyword" AND space = "SPACEKEY" AND type = page'
 ```
 
+按相关度和更新时间各召回最多 50 条、补充 views 后取浏览量最高的页面：
+
+```powershell
+python confluence_api.py search-ranked-by-views 'text ~ "keyword" AND space = "SPACEKEY" AND type = page' --recall-limit 50 --top-limit 5
+python confluence_api.py search-ranked-by-views 'text ~ "keyword" AND type = page' --read-top
+```
+
 按标题搜索页面：
 
 ```powershell
 python confluence_api.py search-by-title "Page Title" --space SPACEKEY
+```
+
+按关键词执行 views 排序搜索：
+
+```powershell
+python confluence_api.py search-pages-ranked-by-views "keyword" --space SPACEKEY --read-top
 ```
 
 搜索空间：
@@ -133,6 +146,13 @@ python confluence_api.py list-pages SPACEKEY --limit 25
 
 ```powershell
 python confluence_api.py list-children PAGE_ID --limit 25
+```
+
+获取页面浏览量：
+
+```powershell
+python confluence_api.py get-page-views PAGE_ID
+python confluence_api.py get-pages-views PAGE_ID_1 PAGE_ID_2 PAGE_ID_3
 ```
 
 读取页面：
@@ -166,7 +186,11 @@ python confluence_api.py list-attachments PAGE_ID --limit 25
 
 ```json
 {"action":"search","cql":"text ~ \"keyword\" AND type = page","limit":10}
+{"action":"search_ranked_by_views","cql":"text ~ \"keyword\" AND type = page","recallLimit":50,"topLimit":5,"readTop":true}
+{"action":"search_pages_ranked_by_views","keyword":"keyword","spaceKey":"SPACEKEY","recallLimit":50,"topLimit":5,"readTop":true}
 {"action":"search_by_title","title":"Page Title","spaceKey":"SPACEKEY"}
+{"action":"get_page_views","pageId":"12345678"}
+{"action":"get_pages_views","pageIds":["12345678","23456789"]}
 {"action":"get_page","pageId":"12345678"}
 {"action":"list_spaces","limit":50}
 {"action":"list_pages","spaceKey":"SPACEKEY","limit":25}
@@ -203,14 +227,15 @@ confluence-access/cache/page-<page_id>.json
 
 ## 回答规范
 
-搜索或列表结果只展示关键信息：标题、页面 ID、作者、空间 key/name、URL、版本号、最近更新时间。
+搜索或列表结果只展示关键信息：标题、页面 ID、作者、空间 key/name、URL、版本号、最近更新时间；当本轮流程需要排序候选时，可额外展示 views。
 
 搜索类任务默认采用 Search-Read-Extract-Reflect-Refine 循环，由 agent 根据任务目标自行迭代搜索、读取、提炼、反思和细化。默认最大搜索轮次为 10 轮，不要依赖固定两轮搜索策略。
 
 循环方式：
 
-- **Search**：用 `search-pages`、`search-by-title`、`search-cql`、`list-pages`、`list-children` 等基础命令定位候选页面。搜索或列表结果只展示关键信息：标题、页面 ID、作者、空间、URL、版本号、最近更新时间。
-- **Read**：读取最相关、最可能回答问题的页面正文。优先使用 `get-page --summary`，必要时读取多个互补页面。
+- **Search 阶段一（双路召回）**：根据当前搜索目标构造 CQL 或关键词查询。优先使用 `search-ranked-by-views` 或 `search-pages-ranked-by-views`；其内部会取按相关程度排序的前最多 50 条结果，并取按更新时间排序的前最多 50 条结果，合并去重后形成最多 100 条候选。若需要手动执行，分别使用普通 CQL 搜索和带 `ORDER BY lastmodified DESC` 的 CQL 搜索。
+- **Search 阶段二（views 排序）**：对阶段一候选批量读取 views 浏览量，按 views 从高到低选择最多 5 条结果。只对这 5 条获取完整文档内容，进入后续分析。若 analytics/views API 不可用，说明限制，并退化为基于相关度、更新时间和标题/空间线索选择最多 5 条读取。
+- **Read**：读取阶段二选出的最多 5 个页面正文。优先使用 `search-ranked-by-views --read-top` / `search-pages-ranked-by-views --read-top` 一次完成；需要精确控制时使用 `get-page --summary` 逐页读取。
 - **Extract**：每轮读取后必须先整理可检索的关键信息，再进入下一轮。至少整理以下内容：
 	- 关键词：业务术语、系统名、模块名、流程动作词、别名/缩写、中英文同义词。
 	- 编号类线索：需求号、项目号、工单号、发布版本号、规则编号、页面 ID、空间 key、Jira issue key。
@@ -258,8 +283,8 @@ confluence-access/cache/page-<page_id>.json
 ## 推荐流程
 
 1. 如果不确定配置是否正确，先运行 `check-config`。
-2. 根据用户问题构造第一组搜索词，使用 `search-pages`、`search-by-title` 或 `search-cql` 定位候选页面。
-3. 读取最相关页面正文，并记录页面标题、URL、空间和页面 ID 作为来源。
+2. 根据用户问题构造第一组搜索词，优先使用 `search-pages-ranked-by-views` 或 `search-ranked-by-views` 执行两阶段搜索：相关度前 50 + 更新时间前 50，合并后补 views，取 views 最高的 5 条。
+3. 读取这 5 条页面正文，并记录页面标题、URL、空间、页面 ID 和 views 作为来源线索；如果 views 不可用，记录不可用原因并退化为读取最相关/最新的最多 5 条。
 4. 每轮读取后提炼关键信息：关键词、编号、业务语境、实体关系、冲突点，并整理成“下一轮检索包”（`must_terms`/`optional_terms`/`exclude_terms`/`id_candidates`/`scope_hints`）。
 5. 反思已读内容是否满足问题：是否缺信息、是否只覆盖局部、是否存在时间版本差异、是否有冲突或矛盾。
 6. 如有缺失或冲突，基于“下一轮检索包”重写搜索条件继续搜索和读取；必要时搜索同一空间的父子页面、相近标题、最近更新页面或明确的 CQL 条件。

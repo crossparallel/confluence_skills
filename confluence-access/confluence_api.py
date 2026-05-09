@@ -241,6 +241,59 @@ class ConfluenceClient:
         )
         return slim_list(raw, self.base_url)
 
+    def search_ranked_by_views(
+        self,
+        cql: str,
+        recall_limit: int = 50,
+        top_limit: int = 5,
+        read_top: bool = False,
+    ) -> dict[str, Any]:
+        """Recall by relevance and recency, then rank candidates by page views."""
+        recall_limit = clamp_int(recall_limit, minimum=1, maximum=50)
+        top_limit = clamp_int(top_limit, minimum=1, maximum=recall_limit * 2)
+
+        base_cql = strip_cql_order_by(cql)
+        relevance = self.search(base_cql, limit=recall_limit)
+        recent = self.search(
+            with_cql_order_by(base_cql, "lastmodified DESC"),
+            limit=recall_limit,
+        )
+        candidates = merge_search_results(
+            [
+                ("relevance", relevance.get("results", [])),
+                ("recent", recent.get("results", [])),
+            ]
+        )
+        candidates_with_views = self.add_views_to_pages(candidates)
+        top_results = sorted(
+            candidates_with_views,
+            key=lambda page: view_sort_value(page.get("views")),
+            reverse=True,
+        )[:top_limit]
+
+        response: dict[str, Any] = {
+            "cql": base_cql,
+            "recallLimit": recall_limit,
+            "topLimit": top_limit,
+            "relevance": {
+                "size": len(relevance.get("results", [])),
+                "hasMore": relevance.get("hasMore"),
+            },
+            "recent": {
+                "size": len(recent.get("results", [])),
+                "hasMore": recent.get("hasMore"),
+            },
+            "candidateCount": len(candidates),
+            "topResults": top_results,
+        }
+        if read_top:
+            response["pages"] = [
+                self.get_page_summary(str(page["id"]))
+                for page in top_results
+                if page.get("id")
+            ]
+        return response
+
     def search_pages(
         self,
         keyword: str,
@@ -256,6 +309,27 @@ class ConfluenceClient:
         if space_key:
             cql_parts.append('space = "{0}"'.format(_escape_cql(space_key)))
         return self.search(" AND ".join(cql_parts), limit=limit, start=start)
+
+    def search_pages_ranked_by_views(
+        self,
+        keyword: str,
+        recall_limit: int = 50,
+        space_key: str | None = None,
+        top_limit: int = 5,
+        read_top: bool = False,
+    ) -> dict[str, Any]:
+        cql_parts = [
+            'text ~ "{0}"'.format(_escape_cql(keyword)),
+            "type = page",
+        ]
+        if space_key:
+            cql_parts.append('space = "{0}"'.format(_escape_cql(space_key)))
+        return self.search_ranked_by_views(
+            " AND ".join(cql_parts),
+            recall_limit=recall_limit,
+            top_limit=top_limit,
+            read_top=read_top,
+        )
 
     def search_by_title(
         self,
@@ -371,6 +445,54 @@ class ConfluenceClient:
             },
         )
         return slim_list(raw, self.base_url)
+
+    def get_page_views(self, page_id: str, strict: bool = True) -> dict[str, Any]:
+        """Return view count for a page when the Confluence analytics API is available."""
+        try:
+            raw = self._get_api(
+                f"/analytics/content/{urllib.parse.quote(page_id)}/views"
+            )
+        except ConfluenceApiError as exc:
+            if strict:
+                raise
+            return {
+                "id": page_id,
+                "views": None,
+                "viewsAvailable": False,
+                "viewsError": str(exc),
+            }
+
+        return {
+            "id": str(raw.get("id") or page_id),
+            "views": extract_view_count(raw),
+            "viewsAvailable": True,
+        }
+
+    def get_pages_views(self, page_ids: list[str], strict: bool = False) -> dict[str, Any]:
+        results = [self.get_page_views(page_id, strict=strict) for page_id in page_ids]
+        return {
+            "results": results,
+            "size": len(results),
+        }
+
+    def add_views_to_pages(self, pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        page_ids = [str(page.get("id")) for page in pages if page.get("id")]
+        views_by_id = {
+            item["id"]: item
+            for item in self.get_pages_views(page_ids, strict=False).get("results", [])
+            if item.get("id")
+        }
+        enriched = []
+        for page in pages:
+            page_id = str(page.get("id") or "")
+            views = views_by_id.get(page_id, {})
+            enriched_page = {**page}
+            enriched_page["views"] = views.get("views")
+            enriched_page["viewsAvailable"] = bool(views.get("viewsAvailable"))
+            if views.get("viewsError"):
+                enriched_page["viewsError"] = views.get("viewsError")
+            enriched.append(enriched_page)
+        return enriched
 
     def get_page(
         self,
@@ -700,6 +822,69 @@ def slim_list(raw: dict[str, Any], base_url: str) -> dict[str, Any]:
     }
 
 
+def merge_search_results(
+    result_groups: list[tuple[str, list[dict[str, Any]]]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for source, results in result_groups:
+        for index, page in enumerate(results, start=1):
+            page_id = str(page.get("id") or "")
+            if not page_id or page_id in seen_ids:
+                continue
+            seen_ids.add(page_id)
+            merged.append(
+                {
+                    **page,
+                    "recallSources": [source],
+                    "recallRanks": {source: index},
+                }
+            )
+    for source, results in result_groups:
+        for index, page in enumerate(results, start=1):
+            page_id = str(page.get("id") or "")
+            if not page_id:
+                continue
+            for merged_page in merged:
+                if str(merged_page.get("id")) == page_id:
+                    sources = merged_page.setdefault("recallSources", [])
+                    if source not in sources:
+                        sources.append(source)
+                    merged_page.setdefault("recallRanks", {})[source] = index
+                    break
+    return merged
+
+
+def extract_view_count(raw: dict[str, Any]) -> int | None:
+    for key in ("count", "views", "viewCount"):
+        value = raw.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
+def view_sort_value(value: Any) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return -1
+
+
+def clamp_int(value: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, value))
+
+
+def strip_cql_order_by(cql: str) -> str:
+    return re.sub(r"\s+ORDER\s+BY\s+.+$", "", cql, flags=re.IGNORECASE).strip()
+
+
+def with_cql_order_by(cql: str, order_by: str) -> str:
+    return f"{strip_cql_order_by(cql)} ORDER BY {order_by}"
+
+
 def build_web_url(item: dict[str, Any], base_url: str) -> str | None:
     """根据响应中的 webui 链接拼出可访问的页面地址。"""
     links = item.get("_links", {})
@@ -819,6 +1004,21 @@ def handle_json_command(command: dict[str, Any], config_path: Path = CONFIG_PATH
             int(command.get("limit", 10)),
             int(command.get("start", 0)),
         )
+    if action == "search_ranked_by_views":
+        return client.search_ranked_by_views(
+            str(command["cql"]),
+            int(command.get("recallLimit", 50)),
+            int(command.get("topLimit", 5)),
+            bool(command.get("readTop", False)),
+        )
+    if action == "search_pages_ranked_by_views":
+        return client.search_pages_ranked_by_views(
+            str(command["keyword"]),
+            int(command.get("recallLimit", 50)),
+            command.get("spaceKey") and str(command.get("spaceKey")),
+            int(command.get("topLimit", 5)),
+            bool(command.get("readTop", False)),
+        )
     if action == "search_by_title":
         return client.search_by_title(
             str(command["title"]),
@@ -826,6 +1026,13 @@ def handle_json_command(command: dict[str, Any], config_path: Path = CONFIG_PATH
             int(command.get("limit", 10)),
             int(command.get("start", 0)),
         )
+    if action == "get_page_views":
+        return client.get_page_views(str(command["pageId"]))
+    if action == "get_pages_views":
+        raw_page_ids = command.get("pageIds", [])
+        if not isinstance(raw_page_ids, list):
+            raise ConfluenceApiError("pageIds must be a list")
+        return client.get_pages_views([str(page_id) for page_id in raw_page_ids])
     if action == "get_page":
         return client.get_page_summary(str(command["pageId"]))
     if action == "list_spaces":
@@ -873,7 +1080,11 @@ def handle_json_command(command: dict[str, Any], config_path: Path = CONFIG_PATH
     supported_actions = [
         "check_config",
         "search",
+        "search_ranked_by_views",
+        "search_pages_ranked_by_views",
         "search_by_title",
+        "get_page_views",
+        "get_pages_views",
         "get_page",
         "list_spaces",
         "list_pages",
@@ -895,6 +1106,17 @@ def handle_search_cql(args: argparse.Namespace) -> None:
     print_json(build_client(args.config).search(args.cql, limit=args.limit, start=args.start))
 
 
+def handle_search_ranked_by_views(args: argparse.Namespace) -> None:
+    print_json(
+        build_client(args.config).search_ranked_by_views(
+            args.cql,
+            recall_limit=args.recall_limit,
+            top_limit=args.top_limit,
+            read_top=args.read_top,
+        )
+    )
+
+
 def handle_search_pages(args: argparse.Namespace) -> None:
     print_json(
         build_client(args.config).search_pages(
@@ -902,6 +1124,18 @@ def handle_search_pages(args: argparse.Namespace) -> None:
             limit=args.limit,
             space_key=args.space,
             start=args.start,
+        )
+    )
+
+
+def handle_search_pages_ranked_by_views(args: argparse.Namespace) -> None:
+    print_json(
+        build_client(args.config).search_pages_ranked_by_views(
+            args.keyword,
+            recall_limit=args.recall_limit,
+            space_key=args.space,
+            top_limit=args.top_limit,
+            read_top=args.read_top,
         )
     )
 
@@ -953,6 +1187,14 @@ def handle_list_children(args: argparse.Namespace) -> None:
             start=args.start,
         )
     )
+
+
+def handle_get_page_views(args: argparse.Namespace) -> None:
+    print_json(build_client(args.config).get_page_views(args.page_id))
+
+
+def handle_get_pages_views(args: argparse.Namespace) -> None:
+    print_json(build_client(args.config).get_pages_views(args.page_ids))
 
 
 def handle_get_page(args: argparse.Namespace) -> None:
@@ -1053,11 +1295,60 @@ def build_parser() -> argparse.ArgumentParser:
     add_paging_args(search_cql, 10)
     search_cql.set_defaults(handler=handle_search_cql)
 
+    search_ranked = subparsers.add_parser(
+        "search-ranked-by-views",
+        help="Recall by relevance and recency, then rank candidates by views.",
+    )
+    search_ranked.add_argument("cql", help="Confluence CQL expression without ORDER BY.")
+    search_ranked.add_argument(
+        "--recall-limit",
+        type=int,
+        default=50,
+        help="Maximum results to recall per relevance/recency pass, capped at 50.",
+    )
+    search_ranked.add_argument(
+        "--top-limit",
+        type=int,
+        default=5,
+        help="Maximum view-ranked results to return.",
+    )
+    search_ranked.add_argument(
+        "--read-top",
+        action="store_true",
+        help="Also fetch summary content for the top view-ranked pages.",
+    )
+    search_ranked.set_defaults(handler=handle_search_ranked_by_views)
+
     search_pages = subparsers.add_parser("search-pages", help="Search pages by keyword.")
     search_pages.add_argument("keyword", help="Keyword to search for.")
     search_pages.add_argument("--space", help="Optional Confluence space key.")
     add_paging_args(search_pages, 10)
     search_pages.set_defaults(handler=handle_search_pages)
+
+    search_pages_ranked = subparsers.add_parser(
+        "search-pages-ranked-by-views",
+        help="Search pages by keyword, then rank recalled candidates by views.",
+    )
+    search_pages_ranked.add_argument("keyword", help="Keyword to search for.")
+    search_pages_ranked.add_argument("--space", help="Optional Confluence space key.")
+    search_pages_ranked.add_argument(
+        "--recall-limit",
+        type=int,
+        default=50,
+        help="Maximum results to recall per relevance/recency pass, capped at 50.",
+    )
+    search_pages_ranked.add_argument(
+        "--top-limit",
+        type=int,
+        default=5,
+        help="Maximum view-ranked results to return.",
+    )
+    search_pages_ranked.add_argument(
+        "--read-top",
+        action="store_true",
+        help="Also fetch summary content for the top view-ranked pages.",
+    )
+    search_pages_ranked.set_defaults(handler=handle_search_pages_ranked_by_views)
 
     search_by_title = subparsers.add_parser("search-by-title", help="Search pages by title.")
     search_by_title.add_argument("title", help="Page title or title keyword.")
@@ -1094,6 +1385,20 @@ def build_parser() -> argparse.ArgumentParser:
     list_children.add_argument("page_id", help="Parent page ID.")
     add_paging_args(list_children, 25)
     list_children.set_defaults(handler=handle_list_children)
+
+    get_page_views = subparsers.add_parser(
+        "get-page-views",
+        help="Get a page view count through the analytics API.",
+    )
+    get_page_views.add_argument("page_id", help="Confluence page ID.")
+    get_page_views.set_defaults(handler=handle_get_page_views)
+
+    get_pages_views = subparsers.add_parser(
+        "get-pages-views",
+        help="Get page view counts for multiple page IDs.",
+    )
+    get_pages_views.add_argument("page_ids", nargs="+", help="Confluence page IDs.")
+    get_pages_views.set_defaults(handler=handle_get_pages_views)
 
     get_page = subparsers.add_parser("get-page", help="Get a page by page ID.")
     get_page.add_argument("page_id", help="Confluence page ID.")
