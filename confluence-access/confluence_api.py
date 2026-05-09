@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import locale
 import json
 import os
@@ -151,7 +152,6 @@ def _load_env_config() -> dict[str, str]:
     username = os.getenv("CONFLUENCE_USERNAME")
     api_token = os.getenv("CONFLUENCE_API_TOKEN")
     base_url = os.getenv("CONFLUENCE_BASE_URL")
-    views_endpoint_template = os.getenv("CONFLUENCE_VIEWS_ENDPOINT_TEMPLATE")
 
     if username:
         data["username"] = username.strip()
@@ -159,8 +159,6 @@ def _load_env_config() -> dict[str, str]:
         data["api-token"] = api_token
     if base_url:
         data["base_url"] = base_url
-    if views_endpoint_template:
-        data["views_endpoint_template"] = views_endpoint_template
 
     return data
 
@@ -181,8 +179,6 @@ def _validate_config(data: Any, config_path: Path) -> dict[str, str]:
         "api-token": str(data["api-token"]),
         "base_url": str(data["base_url"]).rstrip("/"),
     }
-    if data.get("views_endpoint_template"):
-        config["views_endpoint_template"] = str(data["views_endpoint_template"]).strip()
     return config
 
 
@@ -219,7 +215,6 @@ class ConfluenceClient:
 
     def __init__(self, config: dict[str, str]) -> None:
         self.base_url = config["base_url"].rstrip("/")
-        self.views_endpoint_template = config.get("views_endpoint_template", "").strip()
         # 与附件脚本保持一致：有 PAT 时发送 Bearer token。
         self.headers = {
             "Authorization": build_auth_header(config["username"], config["api-token"]),
@@ -460,132 +455,89 @@ class ConfluenceClient:
         return slim_list(raw, self.base_url)
 
     def get_page_views(self, page_id: str, strict: bool = True) -> dict[str, Any]:
-        """Return view count for a page when an analytics source is available."""
-        errors: list[str] = []
-        attempts = self._build_views_attempts(page_id)
-        for attempt_name, url in attempts:
-            try:
-                raw = self._request_json_url("GET", url)
-            except ConfluenceApiError as exc:
-                errors.append(f"{attempt_name}: {exc}")
-                continue
-
-            views = extract_view_count(raw)
-            if views is not None:
-                return {
-                    "id": page_id,
-                    "views": views,
-                    "viewsAvailable": True,
-                    "viewsSource": attempt_name,
-                }
-            errors.append(f"{attempt_name}: response did not contain a view count")
-
-        html_result = self._get_page_views_from_html(page_id)
-        if html_result.get("viewsAvailable"):
-            return html_result
-        if html_result.get("viewsError"):
-            errors.append(str(html_result["viewsError"]))
-
-        if strict:
-            detail = "; ".join(errors) if errors else "no views endpoints configured"
-            raise ConfluenceApiError(f"Page views unavailable for {page_id}: {detail}")
-        return {
-            "id": page_id,
-            "views": None,
-            "viewsAvailable": False,
-            "viewsError": "; ".join(errors) if errors else "no views endpoints configured",
-        }
-
-    def _build_views_attempts(self, page_id: str) -> list[tuple[str, str]]:
-        encoded_page_id = urllib.parse.quote(page_id)
-        attempts: list[tuple[str, str]] = []
-        if self.views_endpoint_template:
-            attempts.append(
-                (
-                    "configured",
-                    self.views_endpoint_template.format(
-                        page_id=encoded_page_id,
-                        raw_page_id=page_id,
-                        base_url=self.base_url,
-                    ),
-                )
-            )
-        attempts.extend(
-            [
-                (
-                    "data-center-analytics-content-views",
-                    f"{self.base_url}/rest/analytics/1.0/content/{encoded_page_id}/views",
-                ),
-                (
-                    "data-center-analytics-page",
-                    f"{self.base_url}/rest/analytics/1.0/publish/page/{encoded_page_id}",
-                ),
-                (
-                    "data-center-confluence-analytics-content",
-                    f"{self.base_url}/rest/confluence-analytics/1.0/content/{encoded_page_id}/views",
-                ),
-                (
-                    "cloud-analytics-content-views",
-                    f"{self.base_url}/wiki/rest/api/analytics/content/{encoded_page_id}/views",
-                ),
-                (
-                    "rest-api-analytics-content-views",
-                    f"{self.base_url}/rest/api/analytics/content/{encoded_page_id}/views",
-                ),
-            ]
-        )
-        return attempts
-
-    def _get_page_views_from_html(self, page_id: str) -> dict[str, Any]:
-        try:
-            page = self.get_page(page_id, expand="space")
-        except ConfluenceApiError as exc:
-            return {
-                "id": page_id,
-                "views": None,
-                "viewsAvailable": False,
-                "viewsError": f"html-page-lookup: {exc}",
-            }
-
-        url = build_web_url(page, self.base_url)
-        if not url:
-            return {
-                "id": page_id,
-                "views": None,
-                "viewsAvailable": False,
-                "viewsError": "html-page-lookup: page web URL unavailable",
-            }
-
+        """Return view count by reading the lightweight Page Information HTML."""
+        url = self._build_page_info_url(page_id)
         try:
             html = self._request_text_url("GET", url)
         except ConfluenceApiError as exc:
+            if strict:
+                raise ConfluenceApiError(
+                    f"Page views unavailable for {page_id} from page info HTML: {exc}"
+                ) from exc
             return {
                 "id": page_id,
                 "views": None,
                 "viewsAvailable": False,
-                "viewsError": f"html-page: {exc}",
+                "viewsSource": "page-info-html",
+                "viewsUrl": url,
+                "viewsError": str(exc),
             }
+
         views = extract_view_count_from_text(html)
         if views is None:
+            message = "page-info-html: no recognizable views value in page information HTML"
+            if strict:
+                raise ConfluenceApiError(f"Page views unavailable for {page_id}: {message}")
             return {
                 "id": page_id,
                 "views": None,
                 "viewsAvailable": False,
-                "viewsError": "html-page: no recognizable views value in page HTML",
+                "viewsSource": "page-info-html",
+                "viewsUrl": url,
+                "viewsError": message,
             }
         return {
             "id": page_id,
             "views": views,
             "viewsAvailable": True,
-            "viewsSource": "html-page",
+            "viewsSource": "page-info-html",
+            "viewsUrl": url,
         }
 
     def get_pages_views(self, page_ids: list[str], strict: bool = False) -> dict[str, Any]:
-        results = [self.get_page_views(page_id, strict=strict) for page_id in page_ids]
+        results = self._get_pages_views_concurrently(page_ids, strict=strict)
         return {
             "results": results,
             "size": len(results),
         }
+
+    def _get_pages_views_concurrently(
+        self,
+        page_ids: list[str],
+        strict: bool = False,
+        max_workers: int = 12,
+    ) -> list[dict[str, Any]]:
+        if not page_ids:
+            return []
+        workers = max(1, min(max_workers, len(page_ids)))
+        results_by_id: dict[str, dict[str, Any]] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_page_id = {
+                executor.submit(self.get_page_views, page_id, strict): page_id
+                for page_id in page_ids
+            }
+            for future in concurrent.futures.as_completed(future_to_page_id):
+                page_id = future_to_page_id[future]
+                try:
+                    results_by_id[page_id] = future.result()
+                except ConfluenceApiError as exc:
+                    if strict:
+                        raise
+                    results_by_id[page_id] = {
+                        "id": page_id,
+                        "views": None,
+                        "viewsAvailable": False,
+                        "viewsSource": "page-info-html",
+                        "viewsUrl": self._build_page_info_url(page_id),
+                        "viewsError": str(exc),
+                    }
+        return [results_by_id[page_id] for page_id in page_ids if page_id in results_by_id]
+
+    def _build_page_info_url(self, page_id: str) -> str:
+        return (
+            f"{self.base_url}/pages/viewinfo.action?"
+            f"pageId={urllib.parse.quote(str(page_id))}"
+        )
 
     def add_views_to_pages(self, pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         page_ids = [str(page.get("id")) for page in pages if page.get("id")]
@@ -1048,8 +1000,10 @@ def extract_view_count_from_text(text: str) -> int | None:
     patterns = [
         r'"(?:viewCount|views|totalViews|totalViewCount)"\s*:\s*"?([0-9][0-9,]*)"?',
         r'data-(?:view-count|views)\s*=\s*"([0-9][0-9,]*)"',
-        r'([0-9][0-9,]*)\s+(?:views|viewers|page views)',
-        r'(?:views|page views)\D{0,40}([0-9][0-9,]*)',
+        r'([0-9][0-9,]*)\s+(?:views|viewers|page views|times viewed)',
+        r'(?:views|page views|viewed|viewed by|viewed this page)\D{0,60}([0-9][0-9,]*)',
+        r'([0-9][0-9,]*)\s*(?:次)?(?:浏览|查看|访问)',
+        r'(?:浏览|查看|访问)(?:次数)?\D{0,60}([0-9][0-9,]*)',
     ]
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
@@ -1680,7 +1634,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     get_page_views = subparsers.add_parser(
         "get-page-views",
-        help="Get a page view count through the analytics API.",
+        help="Get a page view count from the lightweight Page Information HTML.",
     )
     get_page_views.add_argument("page_id", help="Confluence page ID.")
     get_page_views.set_defaults(handler=handle_get_page_views)

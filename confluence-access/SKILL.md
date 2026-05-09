@@ -11,7 +11,7 @@ description: Search, browse, retrieve, cache, and summarize Confluence spaces, p
 
 ## 默认搜索工作流
 
-只要任务需要“搜索 Confluence 页面并读取内容”，每一轮搜索都必须使用 views-ranked 两阶段流程。脚本已经把 `search-pages`、`search-cql` 和 JSON action `search` 改成默认执行这个流程；不要用原始搜索结果直接挑页面读取，除非 analytics/views API 不可用、用户明确要求不用 views，或任务只是调试/列出原始候选。
+只要任务需要“搜索 Confluence 页面并读取内容”，每一轮搜索都必须使用 views-ranked 两阶段流程。脚本已经把 `search-pages`、`search-cql` 和 JSON action `search` 改成默认执行这个流程；不要用原始搜索结果直接挑页面读取，除非 Page Information 无法解析 views、用户明确要求不用 views，或任务只是调试/列出原始候选。
 
 默认流程：
 
@@ -21,7 +21,7 @@ description: Search, browse, retrieve, cache, and summarize Confluence spaces, p
 4. 脚本默认读取这 5 条页面正文，并返回 `topResults` 和 `pages`。
 5. 对 `pages` 执行 Extract / Reflect / Refine，生成下一轮搜索目标；下一轮继续调用 `search-pages` 或 `search-cql`，不要退回 raw 搜索。
 
-只有调试、确认 CQL、analytics/views 不可用时回退，或用户明确要求原始候选列表时，才使用 `--raw`、`search-pages-raw`、`search-cql-raw` 或 JSON action `search_raw`。
+只有调试、确认 CQL、Page Information 无法解析 views 时回退，或用户明确要求原始候选列表时，才使用 `--raw`、`search-pages-raw`、`search-cql-raw` 或 JSON action `search_raw`。
 
 ## 绝对禁止
 
@@ -59,7 +59,6 @@ description: Search, browse, retrieve, cache, and summarize Confluence spaces, p
 CONFLUENCE_USERNAME
 CONFLUENCE_API_TOKEN
 CONFLUENCE_BASE_URL
-CONFLUENCE_VIEWS_ENDPOINT_TEMPLATE
 ```
 
 约定：
@@ -67,7 +66,7 @@ CONFLUENCE_VIEWS_ENDPOINT_TEMPLATE
 - `CONFLUENCE_USERNAME` 填邮箱。
 - `confluence-access` 会把它作为鉴权账号使用完整邮箱。
 - 如果没有环境变量，再读取 `config.yaml`。
-- Data Center 没有稳定公开的页面 views REST API。若实例有内部 analytics 或插件接口，可配置 `views_endpoint_template` / `CONFLUENCE_VIEWS_ENDPOINT_TEMPLATE`，模板支持 `{page_id}`、`{raw_page_id}`、`{base_url}`，例如 `http://cf.example.com/rest/custom/{page_id}/views`。
+- Data Center 不使用 analytics REST API 查询 views。脚本通过轻量 Page Information 页面 `pages/viewinfo.action?pageId=...` 读取浏览量，只解析页面信息 HTML，不下载页面正文。
 
 `config.yaml` 示例：
 
@@ -75,7 +74,6 @@ CONFLUENCE_VIEWS_ENDPOINT_TEMPLATE
 username: "your-email-or-username"
 api-token: "your-api-token"
 base_url: "https://your-confluence.example.com"
-views_endpoint_template: "https://your-confluence.example.com/rest/custom/{page_id}/views"
 ```
 
 鉴权方式固定为：
@@ -126,7 +124,7 @@ python confluence_api.py search-pages-ranked-by-views "keyword" --space SPACEKEY
 python confluence_api.py search-ranked-by-views 'text ~ "keyword" AND type = page' --recall-limit 50 --top-limit 5
 ```
 
-低层 raw 搜索命令（只用于调试、确认 CQL、analytics/views 不可用时的回退，或用户明确要求查看原始候选列表）：
+低层 raw 搜索命令（只用于调试、确认 CQL、Page Information 无法解析 views 时的回退，或用户明确要求查看原始候选列表）：
 
 按关键词搜索页面，不读取 views 或正文：
 
@@ -179,7 +177,7 @@ python confluence_api.py get-page-views PAGE_ID
 python confluence_api.py get-pages-views PAGE_ID_1 PAGE_ID_2 PAGE_ID_3
 ```
 
-在 Data Center 中，`get-page-views` 会依次尝试已配置的自定义 endpoint、常见内部 analytics REST 路径、Cloud 兼容路径，以及页面 HTML 中可能暴露的 views 值。若都不可用，会返回 `viewsAvailable: false` 和失败原因；不要把不可用当作 views 为 0。
+在 Data Center 中，`get-page-views` 不调用 analytics API；它只请求轻量页面信息页 `pages/viewinfo.action?pageId=...`，从 HTML 中解析浏览量。批量查询会并发执行，但不会下载正文。若无法解析，会返回 `viewsAvailable: false` 和失败原因；不要把不可用当作 views 为 0。
 
 读取页面：
 
@@ -258,12 +256,12 @@ confluence-access/cache/page-<page_id>.json
 
 搜索类任务默认采用 Search-Read-Extract-Reflect-Refine 循环，由 agent 根据任务目标自行迭代搜索、读取、提炼、反思和细化。默认最大搜索轮次为 10 轮，不要依赖固定两轮搜索策略。
 
-**强制默认规则**：只要任务需要“搜索 Confluence 页面并读取内容”，每一轮 Search 都必须执行 views-ranked 两阶段流程。`search-pages`、`search-cql` 和 JSON action `search` 已经默认执行该流程并读取 Top 5 页面正文。不要用 `--raw`、`search-pages-raw`、`search-cql-raw` 或 `search_raw` 的前几条结果进入 Read，除非 analytics/views API 不可用、用户明确要求不用 views，或任务只是调试/列出原始搜索结果。若跳过 views，必须在回答或工作记录中说明原因。
+**强制默认规则**：只要任务需要“搜索 Confluence 页面并读取内容”，每一轮 Search 都必须执行 views-ranked 两阶段流程。`search-pages`、`search-cql` 和 JSON action `search` 已经默认执行该流程并读取 Top 5 页面正文。不要用 `--raw`、`search-pages-raw`、`search-cql-raw` 或 `search_raw` 的前几条结果进入 Read，除非 Page Information 无法解析 views、用户明确要求不用 views，或任务只是调试/列出原始搜索结果。若跳过 views，必须在回答或工作记录中说明原因。
 
 循环方式：
 
 - **Search 阶段一（双路召回）**：根据当前搜索目标构造 CQL 或关键词查询。默认使用 `search-pages` 或 `search-cql`；其内部会取按相关程度排序的前最多 50 条结果，并取按更新时间排序的前最多 50 条结果，合并去重后形成最多 100 条候选。若需要手动执行，分别使用 raw CQL 搜索和带 `ORDER BY lastmodified DESC` 的 raw CQL 搜索。
-- **Search 阶段二（views 排序）**：对阶段一候选批量读取 views 浏览量，按 views 从高到低选择最多 5 条结果。只对这 5 条获取完整文档内容，进入后续分析。若 analytics/views API 不可用，说明限制，并退化为基于相关度、更新时间和标题/空间线索选择最多 5 条读取。
+- **Search 阶段二（views 排序）**：对阶段一候选批量读取 Page Information HTML 并解析 views 浏览量，按 views 从高到低选择最多 5 条结果。只对这 5 条获取完整文档内容，进入后续分析。若 Page Information 无法解析 views，说明限制，并退化为基于相关度、更新时间和标题/空间线索选择最多 5 条读取。
 - **Read**：读取阶段二选出的最多 5 个页面正文。默认 `search-pages` / `search-cql` 会一次完成；需要精确控制时使用 `--no-read-top` 只返回 Top 5 元数据，再用 `get-page --summary` 逐页读取。
 - **Extract**：每轮读取后必须先整理可检索的关键信息，再进入下一轮。至少整理以下内容：
 	- 关键词：业务术语、系统名、模块名、流程动作词、别名/缩写、中英文同义词。

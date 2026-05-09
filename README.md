@@ -109,6 +109,7 @@ Jira 约定如下：
 主要能力：
 
 - 按关键词、标题或 CQL 搜索 Confluence 页面。
+- 默认执行 views-ranked 两阶段搜索：相关度前 50 + 更新时间前 50，读取候选页面 Page Information 中的浏览量，按 views 选择 Top 5。
 - 查找或列出 Confluence 空间。
 - 读取指定页面内容，并基于实际页面回答问题。
 - 列出空间下页面、页面子页面和页面附件。
@@ -119,10 +120,12 @@ Jira 约定如下：
 
 1. 读取 `confluence-access/config.yaml`。
 2. 调用 `confluence_api.py` 访问 Confluence REST API。
-3. 搜索或读取目标页面。
-4. 对搜索到的相关页面信息进行汇总整理。
-5. 默认用正常文段语言回答用户。
-6. 只有用户明确询问来源、原始结果、页面元数据或要求 JSON 时，才返回完整 JSON 信息。
+3. 使用 `search-pages` 或 `search-cql` 执行默认搜索流程：按相关度召回最多 50 条，按更新时间召回最多 50 条，合并去重。
+4. 对候选页面并发请求轻量 Page Information 页面 `pages/viewinfo.action?pageId=...`，只解析浏览量，不下载正文。
+5. 按 views 选择 Top 5 页面并读取正文。
+6. 对读取到的相关页面信息进行汇总整理。
+7. 默认用正常文段语言回答用户。
+8. 只有用户明确询问来源、原始结果、页面元数据或要求 JSON 时，才返回完整 JSON 信息。
 
 重要限制：
 
@@ -136,9 +139,18 @@ Jira 约定如下：
 ```powershell
 cd C:\Users\KK\Desktop\skills\confluence-access
 python confluence_api.py check-config
-python confluence_api.py search-pages "keyword" --space SPACEKEY --limit 10
+python confluence_api.py search-pages "keyword" --space SPACEKEY
+python confluence_api.py search-cql 'text ~ "keyword" AND space = "SPACEKEY" AND type = page'
+python confluence_api.py get-page-views PAGE_ID
 python confluence_api.py get-page PAGE_ID --summary
 python confluence_api.py list-attachments PAGE_ID --limit 25
+```
+
+调试或回退时才使用 raw 搜索：
+
+```powershell
+python confluence_api.py search-pages "keyword" --space SPACEKEY --raw --limit 10
+python confluence_api.py search-cql-raw 'text ~ "keyword" AND type = page'
 ```
 
 ### 2.2 jira-access
